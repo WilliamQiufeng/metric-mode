@@ -11,8 +11,18 @@ dependencyResolutionManagement {
     }
 }
 
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+        google()
+    }
+}
+
 plugins {
     // Use the Foojay Toolchains plugin to automatically download JDKs required by subprojects.
+    kotlin("jvm") version "2.2.20" apply false
+    kotlin("plugin.serialization") version "2.2.20s" apply false
     id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"
 }
 
