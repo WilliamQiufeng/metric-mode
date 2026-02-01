@@ -150,6 +150,7 @@ class WorkflowController(
         val checklistTools = ChecklistTools(checklist)
         val quitTools = QuitTools()
         val path = Path.of("/home/william/IdeaProjects/fuzzy-disco/data_path.txt").readText()
+        val predictionPath = Path.of("/home/william/IdeaProjects/fuzzy-disco/prediction_path.txt").readText()
 
         val toolRegistry = ToolRegistry {
             // CLI I/O tools
@@ -188,7 +189,8 @@ Hard rules:
    Read ONLY the first few lines.
 5) Keep looping until checkStatus says ok=true. Then output a final concise summary (and stop calling tools).
 
-path to data CSV file is pre-given as $path
+path to data CSV file is pre-given as $path.
+path to prediction set is pre-given as $predictionPath.
 """.trimIndent()
 
         val executor = simpleOpenAIExecutor(apiKey)
