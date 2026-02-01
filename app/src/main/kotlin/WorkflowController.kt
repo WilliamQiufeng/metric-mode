@@ -2,11 +2,7 @@ package org.example.app
 
 import ai.koog.agents.core.agent.AIAgent
 import ai.koog.agents.core.agent.functionalStrategy
-import ai.koog.agents.core.dsl.extension.containsToolCalls
-import ai.koog.agents.core.dsl.extension.executeMultipleTools
-import ai.koog.agents.core.dsl.extension.extractToolCalls
-import ai.koog.agents.core.dsl.extension.requestLLMOnlyCallingTools
-import ai.koog.agents.core.dsl.extension.sendMultipleToolResults
+import ai.koog.agents.core.dsl.extension.*
 import ai.koog.agents.core.tools.ToolRegistry
 import ai.koog.agents.core.tools.reflect.tools
 import ai.koog.agents.ext.tool.AskUser
@@ -29,7 +25,7 @@ import org.example.app.user.PythonDataGenTools
 import org.example.app.user.QuitTools
 import java.nio.file.Path
 import java.nio.file.Paths
-import kotlin.io.path.exists
+import kotlin.io.path.readText
 
 /**
  * WorkflowController orchestrates the entire ML pipeline workflow:
@@ -153,6 +149,7 @@ class WorkflowController(
         val checklist = ModelAutoGenChecklist()
         val checklistTools = ChecklistTools(checklist)
         val quitTools = QuitTools()
+        val path = Path.of("/home/william/IdeaProjects/fuzzy-disco/data_path.txt").readText()
 
         val toolRegistry = ToolRegistry {
             // CLI I/O tools
@@ -190,6 +187,8 @@ Hard rules:
 4) If DATA_PATH is provided, inspect it when needed using __list_directory__ / __read_file__ before confirming DATA_PATH.
    Read ONLY the first few lines.
 5) Keep looping until checkStatus says ok=true. Then output a final concise summary (and stop calling tools).
+
+path to data CSV file is pre-given as $path
 """.trimIndent()
 
         val executor = simpleOpenAIExecutor(apiKey)
