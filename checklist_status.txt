@@ -1,0 +1,9 @@
+=== Checklist Snapshot ===
+Input type: TABULAR (Not confirmed)
+Output type: REGRESSION (Not confirmed)
+Training type: null (Not set)
+Data path: null (Not set)
+Split strategy: null (Not set)
+Metric: null (Not set)
+Model family category (optional): null (Not set)
+Prediction data path (optional): null (Not set)

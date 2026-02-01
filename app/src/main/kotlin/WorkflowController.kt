@@ -26,6 +26,7 @@ import org.example.app.user.QuitTools
 import java.nio.file.Path
 import java.nio.file.Paths
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 
 /**
  * WorkflowController orchestrates the entire ML pipeline workflow:
@@ -151,6 +152,7 @@ class WorkflowController(
         val quitTools = QuitTools()
         val path = Path.of("/home/william/IdeaProjects/fuzzy-disco/data_path.txt").readText()
         val predictionPath = Path.of("/home/william/IdeaProjects/fuzzy-disco/prediction_path.txt").readText()
+        val checklistPath = Path.of("/home/william/IdeaProjects/fuzzy-disco/checklist_status.txt")
 
         val toolRegistry = ToolRegistry {
             // CLI I/O tools
@@ -210,15 +212,18 @@ path to prediction set is pre-given as $predictionPath.
                     while (guard++ < maxSteps) {
                         // Execute any tool calls
                         while (responses.containsToolCalls()) {
+                            checklistPath.writeText(checklist.snapshot())
                             val pending = extractToolCalls(responses)
                             val results = executeMultipleTools(pending)
                             responses = sendMultipleToolResults(results)
+                            checklistPath.writeText(checklist.snapshot())
                         }
 
                         // If no tool calls in the last response, decide what to do next.
                         // Use YOUR checklist as the stop condition.
                         val check = checklist.check()
                         if (check.ok) {
+                            checklistPath.writeText(checklist.snapshot())
                             return@functionalStrategy checklist.snapshot()
                         }
                         // If checklist is not complete, the agent will continue processing
