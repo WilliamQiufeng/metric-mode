@@ -222,7 +222,7 @@ Now pick one.
     suspend fun run(
         checklist: ChecklistLike,
         workDir: Path,
-        maxModelRetries: Int = 3
+        maxModelRetries: Int = 5
     ): PipelineResult {
         if (!checklist.check()) {
             return PipelineResult.Failed(

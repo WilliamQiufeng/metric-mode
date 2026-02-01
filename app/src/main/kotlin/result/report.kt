@@ -21,7 +21,11 @@ import kotlin.io.path.writeText
  *
  * Generates a detailed report based on:
  * - model.py
- * - final_test.py output (stdout + optional JSON)
+ * - Pipeline artifacts from the latest workflow (if present):
+ *     * tune_result.json, best_params.json
+ *     * final_train_result.json, trained_model.json
+ *     * prediction_result.json, predictions.csv
+ * - Optional final_test output (stdout + optional JSON) if you still run a separate final_test.py stage.
  *
  * Outputs:
  * - workDir/report.md
@@ -66,10 +70,51 @@ class ReportGenerator(
         val pdfPath: Path
     )
 
+    /**
+     * Legacy entry-point for the older "final_test"-centric workflow.
+     * Kept to avoid breaking older callers; internally routes to generatePipelineReport(...).
+     */
+    @Deprecated("Use generatePipelineReport(...) for the tune/final_train/prediction workflow")
     suspend fun generate(
         workDir: Path,
         spec: MlAutoGenCore.ChecklistSpec,
         finalTestStdout: String,
+        finalTestJson: JsonObject? = null,
+        contract: String = MlAutoGenCore.MODEL_API_CONTRACT,
+        outMarkdown: String = "report.md",
+        outPdf: String = "report.pdf"
+    ): ReportArtifacts = generatePipelineReport(
+        workDir = workDir,
+        spec = spec,
+        tuneStdout = null,
+        tuneJson = null,
+        finalTrainStdout = null,
+        finalTrainJson = null,
+        predictionStdout = null,
+        predictionJson = null,
+        finalTestStdout = finalTestStdout,
+        finalTestJson = finalTestJson,
+        contract = contract,
+        outMarkdown = outMarkdown,
+        outPdf = outPdf
+    )
+
+    /**
+     * New entry-point: report for the tune -> final_train -> prediction pipeline.
+     *
+     * You can pass stdout/JSON from each stage if you have them in memory; otherwise this will
+     * try to read the standard artifacts from workDir for grounding.
+     */
+    suspend fun generatePipelineReport(
+        workDir: Path,
+        spec: MlAutoGenCore.ChecklistSpec,
+        tuneStdout: String? = null,
+        tuneJson: JsonObject? = null,
+        finalTrainStdout: String? = null,
+        finalTrainJson: JsonObject? = null,
+        predictionStdout: String? = null,
+        predictionJson: JsonObject? = null,
+        finalTestStdout: String? = null,
         finalTestJson: JsonObject? = null,
         contract: String = MlAutoGenCore.MODEL_API_CONTRACT,
         outMarkdown: String = "report.md",
@@ -84,19 +129,33 @@ class ReportGenerator(
             maxChars = 9000
         )
 
+        // Try to ground the report in on-disk artifacts, even if caller doesn't provide stdout/json.
+        val tuneResultPreview = readTextPreviewIfExists(workDir.resolve("tune_result.json"), 2500)
+        val bestParamsPreview = readTextPreviewIfExists(workDir.resolve("best_params.json"), 2500)
+        val finalTrainResultPreview = readTextPreviewIfExists(workDir.resolve("final_train_result.json"), 2500)
+        val trainedModelPreview = readTextPreviewIfExists(workDir.resolve("trained_model.json"), 1800)
+        val predictionResultPreview = readTextPreviewIfExists(workDir.resolve("prediction_result.json"), 2500)
+        val predictionsCsvPreview = readLinesPreviewIfExists(workDir.resolve("predictions.csv"), maxLines = 25, maxChars = 4000)
+
         val fixingParser = StructureFixingParser(model = fixerModel, retries = 2)
 
-        val p = prompt("generate-detailed-report") {
+        val p = prompt("generate-detailed-report-v2") {
             system(
                 """
 You are a senior ML engineer writing a detailed technical report for stakeholders.
+
+The system runs a multi-stage pipeline:
+1) tune.py: train/val split and hyperparameter selection -> best_params.json + tune_result.json
+2) final_train.py: train final model on all labeled data using best_params -> trained_model.json + final_train_result.json
+3) predict.py: run inference on a separate prediction dataset -> predictions.csv + prediction_result.json
 
 Output ONLY valid JSON following the schema ReportDoc.
 No markdown fences. No extra commentary.
 
 Constraints:
 - Be consistent with the given task spec + contract + model.py preview.
-- Use final_test stdout + JSON (if provided) for evaluation/metrics.
+- Ground evaluation/metrics in tune_result (VAL metric) and/or final_test output (if provided).
+- If some artifacts are missing, explicitly say which ones are missing and what the pipeline can/cannot guarantee.
 - Keep it detailed but not overly long.
 - Write in English (PDF writer is ASCII-first).
                 """.trimIndent()
@@ -117,10 +176,50 @@ $contract
 model.py preview (may be truncated):
 $modelPreview
 
-final_test stdout:
-${ResultIo.truncateForPrompt(finalTestStdout, 8000)}
+---
+Tune stage (optional in-memory stdout):
+${tuneStdout?.let { ResultIo.truncateForPrompt(it, 6000) } ?: "null"}
 
-final_test JSON (if any):
+Tune stage JSON (optional):
+${tuneJson?.toString() ?: "null"}
+
+tune_result.json preview (if exists):
+${tuneResultPreview ?: "(missing)"}
+
+best_params.json preview (if exists):
+${bestParamsPreview ?: "(missing)"}
+
+---
+Final-train stage (optional in-memory stdout):
+${finalTrainStdout?.let { ResultIo.truncateForPrompt(it, 6000) } ?: "null"}
+
+Final-train stage JSON (optional):
+${finalTrainJson?.toString() ?: "null"}
+
+final_train_result.json preview (if exists):
+${finalTrainResultPreview ?: "(missing)"}
+
+trained_model.json preview (if exists; may be large/truncated):
+${trainedModelPreview ?: "(missing)"}
+
+---
+Prediction stage (optional in-memory stdout):
+${predictionStdout?.let { ResultIo.truncateForPrompt(it, 6000) } ?: "null"}
+
+Prediction stage JSON (optional):
+${predictionJson?.toString() ?: "null"}
+
+prediction_result.json preview (if exists):
+${predictionResultPreview ?: "(missing)"}
+
+predictions.csv preview (first lines if exists):
+${predictionsCsvPreview ?: "(missing)"}
+
+---
+Legacy final_test stdout (optional):
+${finalTestStdout?.let { ResultIo.truncateForPrompt(it, 6000) } ?: "null"}
+
+Legacy final_test JSON (optional):
 ${finalTestJson?.toString() ?: "null"}
                 """.trimIndent()
             )
@@ -144,6 +243,20 @@ ${finalTestJson?.toString() ?: "null"}
         )
 
         return ReportArtifacts(markdownPath = mdPath, pdfPath = pdfPath)
+    }
+
+    private fun readTextPreviewIfExists(path: Path, maxChars: Int): String? {
+        if (!path.exists()) return null
+        val txt = runCatching { path.readText() }.getOrNull() ?: return null
+        return ResultIo.truncateForPrompt(txt, maxChars)
+    }
+
+    private fun readLinesPreviewIfExists(path: Path, maxLines: Int, maxChars: Int): String? {
+        if (!path.exists()) return null
+        val txt = runCatching {
+            path.readText().lineSequence().take(maxLines).joinToString("\n")
+        }.getOrNull() ?: return null
+        return ResultIo.truncateForPrompt(txt, maxChars)
     }
 
     private fun renderMarkdown(doc: ReportDoc): String = buildString {

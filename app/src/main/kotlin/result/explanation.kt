@@ -16,7 +16,8 @@ import kotlin.io.path.writeText
 /**
  * explanation.kt
  *
- * Uses an LLM (via Koog) to explain the generated model.py as a step-by-step document.
+ * Uses an LLM (via Koog) to explain the generated model.py AND the surrounding pipeline
+ * (tune -> final_train -> prediction) as a step-by-step document.
  * Output: workDir/explanation.md
  */
 class ExplanationGenerator(
@@ -66,20 +67,33 @@ class ExplanationGenerator(
             maxChars = 9000
         )
 
+        // Optional: ground the explanation in pipeline artifacts if they exist.
+        val tuneResultPreview = readTextPreviewIfExists(workDir.resolve("tune_result.json"), 2500)
+        val bestParamsPreview = readTextPreviewIfExists(workDir.resolve("best_params.json"), 2500)
+        val finalTrainResultPreview = readTextPreviewIfExists(workDir.resolve("final_train_result.json"), 2500)
+        val trainedModelPreview = readTextPreviewIfExists(workDir.resolve("trained_model.json"), 1800)
+        val predictionResultPreview = readTextPreviewIfExists(workDir.resolve("prediction_result.json"), 2500)
+        val predictionsCsvPreview = readLinesPreviewIfExists(workDir.resolve("predictions.csv"), maxLines = 25, maxChars = 4000)
+
         val fixingParser = StructureFixingParser(model = fixerModel, retries = 2)
 
         val p = prompt("explain-model-steps") {
             system(
                 """
 You are a senior ML engineer and technical writer.
-Create an explanation document for the Python model implementation.
+Create an explanation document for the Python model implementation AND the full workflow around it.
+
+The workflow is a multi-stage pipeline:
+1) tune.py: split labeled data into train/val and select hyperparameters -> best_params.json + tune_result.json
+2) final_train.py: train final model on all labeled data using best_params -> trained_model.json + final_train_result.json
+3) predict.py: run inference on a separate prediction dataset -> predictions.csv + prediction_result.json
 
 Output ONLY valid JSON following the schema of ExplanationDoc.
 No markdown fences. No extra commentary.
 
 Constraints:
-- Keep it accurate and grounded in the provided model.py.
-- Keep it practical: what the code does, step-by-step, and how to run/reproduce.
+- Keep it accurate and grounded in the provided model.py and any provided pipeline artifacts.
+- Keep it practical: what the code does, step-by-step (including tune/final_train/predict), and how to run/reproduce.
 - Write in English (to ensure PDF compatibility later).
                 """.trimIndent()
             )
@@ -101,6 +115,27 @@ $contract
 
 model.py preview (may be truncated):
 $modelPreview
+
+---
+Pipeline artifacts (may be missing; use them if present):
+
+tune_result.json preview:
+${tuneResultPreview ?: "(missing)"}
+
+best_params.json preview:
+${bestParamsPreview ?: "(missing)"}
+
+final_train_result.json preview:
+${finalTrainResultPreview ?: "(missing)"}
+
+trained_model.json preview (may be large/truncated):
+${trainedModelPreview ?: "(missing)"}
+
+prediction_result.json preview:
+${predictionResultPreview ?: "(missing)"}
+
+predictions.csv preview (first lines):
+${predictionsCsvPreview ?: "(missing)"}
                 """.trimIndent()
             )
         }
@@ -115,6 +150,20 @@ $modelPreview
         val outPath = workDir.resolve(outFileName)
         outPath.writeText(md)
         return outPath
+    }
+
+    private fun readTextPreviewIfExists(path: Path, maxChars: Int): String? {
+        if (!path.exists()) return null
+        val txt = runCatching { path.readText() }.getOrNull() ?: return null
+        return ResultIo.truncateForPrompt(txt, maxChars)
+    }
+
+    private fun readLinesPreviewIfExists(path: Path, maxLines: Int, maxChars: Int): String? {
+        if (!path.exists()) return null
+        val txt = runCatching {
+            path.readText().lineSequence().take(maxLines).joinToString("\n")
+        }.getOrNull() ?: return null
+        return ResultIo.truncateForPrompt(txt, maxChars)
     }
 
     private fun renderMarkdown(doc: ExplanationDoc): String = buildString {

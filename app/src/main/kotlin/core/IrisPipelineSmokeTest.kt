@@ -1,7 +1,7 @@
 package org.example.app.core
 
 // IrisPipelineSmokeTest.kt
-// Put this next to result/run.kt and reuse the same `package` line as run.kt.
+// Put this next to result/final_train.kt and reuse the same `package` line as final_train.kt.
 
 import ai.koog.prompt.executor.llms.all.simpleOpenAIExecutor
 import kotlinx.coroutines.runBlocking

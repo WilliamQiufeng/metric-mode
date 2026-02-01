@@ -17,49 +17,57 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
 /**
- * run.kt
+ * tune.kt
  *
- * 1) Use LLM to generate final_test.py (stronger / more "final" validation).
- * 2) Run it; if it fails, feed error back and regenerate final_test.py.
- *
- * Outputs:
- * - workDir/final_test.py
- * - (optional) workDir/final_test_result.json (written by the python final test)
+ * Goal:
+ * - Always re-run existing test.py first to ensure model.py is still valid.
+ * - Generate tune.py:
+ *    * Load labeled CSV from spec.dataPath
+ *    * TRAIN/VAL split (anti-leakage)
+ *    * Tune hyperparameters using VAL metric only
+ *    * Output best_params.json + tune_result.json + marker line
  */
-class FinalTestOrchestrator(
+class TuneOrchestrator(
     private val executor: PromptExecutor,
     private val llmModel: ai.koog.prompt.llm.LLModel = OpenAIModels.Chat.GPT4oMini
 ) {
-    sealed class FinalTestResult {
+    sealed class TuneResult {
         data class Success(
             val workDir: String,
-            val finalTestPy: String,
+            val tunePy: String,
             val stdout: String,
             val parsedJson: JsonObject?
-        ) : FinalTestResult()
+        ) : TuneResult()
 
         data class Failed(
             val reason: String,
             val workDir: String,
-            val finalTestPy: String?,
+            val tunePy: String?,
             val lastOutput: String
-        ) : FinalTestResult()
+        ) : TuneResult()
     }
 
-    /**
-     * Generate & run final_test.py with retries on failure.
-     *
-     * Assumes model.py already exists and passed the earlier test.py.
-     */
-    suspend fun runFinalTest(
+    suspend fun runTune(
         workDir: Path,
         spec: MlAutoGenCore.ChecklistSpec,
         contract: String = MlAutoGenCore.MODEL_API_CONTRACT,
         maxRetries: Int = 3,
-        outFileName: String = "final_test.py"
-    ): FinalTestResult {
+        outFileName: String = "tune.py",
+        sanityTestFileName: String = "test.py"
+    ): TuneResult {
         val modelPath = workDir.resolve("model.py")
         require(modelPath.exists()) { "model.py not found at: $modelPath" }
+
+        val pythonRunner = PythonRunner()
+
+        // ✅ Gate: re-run already-generated test.py to ensure model.py still satisfies contract
+        val sanityPath = workDir.resolve(sanityTestFileName)
+        if (sanityPath.exists()) {
+            val sanity = pythonRunner.runTest(workDir = workDir, testFileName = sanityTestFileName)
+            require(sanity.exitCode == 0) {
+                "Sanity test ($sanityTestFileName) FAILED. model.py is not safe to tune.\nOutput:\n${sanity.stdout}"
+            }
+        }
 
         val modelPy = modelPath.readText()
         val modelPreview = ResultIo.truncateForPrompt(
@@ -67,150 +75,151 @@ class FinalTestOrchestrator(
             maxChars = 9000
         )
 
-        // ✅ NEW: preview dataset for LLM (first 20 lines)
         val dataPreview = spec.dataPath?.let { CsvPreview.preview(it, workDir) }
 
-        val pythonRunner = PythonRunner()
-
         var lastErr: String? = null
-        var previousFinalTest: String? = null
+        var previousPy: String? = null
 
         repeat(maxRetries) {
-            val finalTestPy = generateFinalTestPy(
+            val py = generateTunePy(
                 spec = spec,
                 contract = contract,
                 modelPreview = modelPreview,
                 dataPreview = dataPreview,
-                previousFinalTestPy = previousFinalTest,
+                previousTunePy = previousPy,
                 lastError = lastErr
             )
 
-            val finalTestPath = workDir.resolve(outFileName)
-            finalTestPath.writeText(finalTestPy)
+            val path = workDir.resolve(outFileName)
+            path.writeText(py)
 
             val run = pythonRunner.runTest(workDir = workDir, testFileName = outFileName)
-            val combinedOut = run.stderr.ifBlank { run.stdout }.ifBlank { run.stdout }
+            val combinedOut = run.stdout
 
             if (run.exitCode == 0) {
-                val parsed = ResultIo.tryParseMarkedJson(combinedOut)
-                return FinalTestResult.Success(
+                val parsed = ResultIo.tryParseMarkedJson(combinedOut, "__TUNE_RESULT__")
+                return TuneResult.Success(
                     workDir = workDir.toString(),
-                    finalTestPy = finalTestPy,
+                    tunePy = py,
                     stdout = combinedOut,
                     parsedJson = parsed
                 )
             }
 
             lastErr = combinedOut
-            previousFinalTest = finalTestPy
+            previousPy = py
         }
 
-        return FinalTestResult.Failed(
-            reason = "final_test.py failed after $maxRetries retries",
+        return TuneResult.Failed(
+            reason = "tune.py failed after $maxRetries retries",
             workDir = workDir.toString(),
-            finalTestPy = previousFinalTest,
+            tunePy = previousPy,
             lastOutput = lastErr ?: ""
         )
     }
 
-    private suspend fun generateFinalTestPy(
+    private suspend fun generateTunePy(
         spec: MlAutoGenCore.ChecklistSpec,
         contract: String,
         modelPreview: String,
         dataPreview: String?,
-        previousFinalTestPy: String?,
+        previousTunePy: String?,
         lastError: String?
     ): String {
-        val p = prompt("generate-final-test-py") {
+        val p = prompt("generate-tune-py") {
             system(
                 """
-You are a strict Python test engineer.
-Generate a SINGLE FILE named final_test.py.
+You are a strict Python ML engineer.
+Generate a SINGLE FILE named tune.py.
 
 Hard requirements:
-1) Validate this contract against model.py:
+1) It must work with the existing model.py that follows this contract:
 $contract
 
 2) Output ONLY valid Python code. No markdown fences. No explanations.
 
-3) The test MUST be robust and dependency-minimal:
-   - Prefer Python stdlib and numpy only.
-   - If numpy is unavailable, fall back to pure Python lists.
-   - Do NOT use pandas/sklearn unless strictly necessary.
+3) Dependencies:
+   - Prefer Python stdlib + numpy only.
+   - Do NOT require pandas.
+   - sklearn is optional; if unavailable, implement split/metric in numpy.
 
-4) Dataset loading rules (CRITICAL):
-   - spec.dataPath may be a directory OR a file path.
-   - If directory: search for a .csv inside (prefer iris.csv if present), else pick the first .csv.
-   - If file: load it if it's .csv.
-   - Must handle BOTH headered and headerless CSV.
-
-   For SUPERVISED classification/regression:
-   - If header exists, try target column names in this priority:
+4) Dataset loading (CRITICAL):
+   - spec.dataPath may be directory or .csv file.
+   - If directory: prefer iris.csv, else first .csv.
+   - Handle headered and headerless CSV.
+   - For supervised tasks: if header exists, prefer target column names:
      ["label","target","y","class","species","outcome"]
-   - If none found OR no header: ALWAYS USE THE LAST COLUMN AS y.
-   - NEVER raise an error just because target column name cannot be identified.
+     else ALWAYS use last column as y.
+   - X must exclude y column. Convert X to float safely.
+   - If y is string labels: encode to integers and save mapping.
 
-5) The test should:
-   - import model
-   - build_model(), instantiate ModelWrapper
-   - call fit(...) when trainingType suggests it is appropriate
-   - call predict(...)
-   - compute at least one metric consistent with spec.metric when possible
-     * For classification: implement accuracy in pure Python/numpy.
-     * For regression: implement MSE/MAE in pure Python/numpy.
+5) Tuning (MUST):
+   - Split labeled data into TRAIN/VAL with seed=42.
+   - Metric MUST be computed on VAL only (anti-leakage).
+   - Compute overlap_rows between train and val (exact row match, include y).
+   - Attempt to tune by trying a small set of candidate configs (10-25):
+       * Always include {} and {"random_state":42} if accepted.
+       * If XGBoost-like keys are accepted, include:
+         n_estimators, max_depth, learning_rate, subsample, colsample_bytree
+       * You MUST robustly handle invalid config keys:
+         - If build_model(config) raises due to invalid keys, skip that config (do not crash).
+   - Choose best_params by VAL metric.
 
-6) The test must produce machine-readable summary:
-   - Print EXACTLY one line starting with: __FINAL_TEST_RESULT__
-   - After the marker, print a single-line JSON object, e.g.:
-     __FINAL_TEST_RESULT__{"status":"ok","metric":"ACCURACY","value":0.93,"notes":["..."]}
-   - Also write the same JSON to final_test_result.json in the current working directory.
+6) Outputs:
+   - Write best_params.json (include best_params dict + label_mapping if any).
+   - Write tune_result.json summary.
+   - Print EXACTLY one line:
+       __TUNE_RESULT__{json}
+     JSON must include:
+       status ("ok"/"degraded"),
+       metric,
+       val_value,
+       seed,
+       train_rows,
+       val_rows,
+       overlap_rows,
+       best_params_path ("best_params.json"),
+       notes (list)
 
-If the previous attempt failed, fix the root cause.
-Write in English comments/strings.
+English comments/strings.
                 """.trimIndent()
             )
 
             user(
                 """
 Task spec:
-- inputType = ${spec.inputType}
-- outputType = ${spec.outputType}
-- trainingType = ${spec.trainingType}
-- splitStrategy = ${spec.splitStrategy}
-- metric = ${spec.metric}
-- dataPath = ${spec.dataPath}
+- inputType=${spec.inputType}
+- outputType=${spec.outputType}
+- trainingType=${spec.trainingType}
+- splitStrategy=${spec.splitStrategy}
+- metric=${spec.metric}
+- dataPath=${spec.dataPath}
 
-model.py preview (may be truncated):
+model.py preview:
 $modelPreview
                 """.trimIndent()
             )
 
-            // ✅ NEW: feed dataset preview to avoid guessing columns
             if (dataPreview != null) {
-                user(
-                    """
-Dataset preview (may be truncated):
-$dataPreview
-                    """.trimIndent()
-                )
+                user("Dataset preview:\n$dataPreview")
             }
 
             if (lastError != null) {
                 user(
                     """
-The last final_test.py FAILED with this output:
+Previous tune.py FAILED with:
 $lastError
 
-Fix it and regenerate the FULL final_test.py.
+Fix it and regenerate FULL tune.py.
                     """.trimIndent()
                 )
             }
 
-            if (previousFinalTestPy != null) {
+            if (previousTunePy != null) {
                 user(
                     """
-Previous final_test.py (for reference). You may rewrite completely:
-$previousFinalTestPy
+Previous tune.py (reference):
+$previousTunePy
                     """.trimIndent()
                 )
             }
@@ -223,20 +232,13 @@ $previousFinalTestPy
     }
 }
 
-/**
- * Shared IO + prompt helpers for org.example.app.result package.
- */
+/** Shared helpers (module-wide) */
 internal object ResultIo {
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun truncateForPrompt(text: String, maxChars: Int): String {
-        if (text.length <= maxChars) return text
-        return text.take(maxChars) + "\n\n...[TRUNCATED]..."
-    }
+    fun truncateForPrompt(text: String, maxChars: Int): String =
+        if (text.length <= maxChars) text else text.take(maxChars) + "\n\n...[TRUNCATED]..."
 
-    /**
-     * A "smart" preview: head + tail to preserve imports and main logic.
-     */
     fun smartPreview(text: String, headChars: Int, tailChars: Int): String {
         if (text.length <= headChars + tailChars + 50) return text
         val head = text.take(headChars)
@@ -250,21 +252,13 @@ internal object ResultIo {
         }
     }
 
-    /**
-     * Extract JSON object printed by final_test.py:
-     * __FINAL_TEST_RESULT__{...json...}
-     */
-    fun tryParseMarkedJson(output: String): JsonObject? {
-        val marker = "__FINAL_TEST_RESULT__"
+    fun tryParseMarkedJson(output: String, marker: String): JsonObject? {
         val line = output.lineSequence().firstOrNull { it.trim().startsWith(marker) } ?: return null
         val jsonPart = line.trim().removePrefix(marker).trim()
         return runCatching { json.parseToJsonElement(jsonPart).jsonObject }.getOrNull()
     }
 }
 
-/**
- * CSV sniffer: reads the first ~20 lines of the resolved CSV so the LLM can see real structure.
- */
 internal object CsvPreview {
     fun preview(dataPathRaw: String, workDir: Path): String? {
         if (dataPathRaw.isBlank()) return null
@@ -282,12 +276,9 @@ internal object CsvPreview {
                 .listFiles()
                 ?.filter { it.isFile && it.name.endsWith(".csv", ignoreCase = true) }
                 .orEmpty()
-
             files.firstOrNull { it.name.equals("iris.csv", ignoreCase = true) }?.toPath()
                 ?: files.firstOrNull()?.toPath()
-        } else {
-            existing
-        }
+        } else existing
 
         if (csvPath == null || !csvPath.exists()) return null
         if (!csvPath.toString().endsWith(".csv", ignoreCase = true)) return null

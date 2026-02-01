@@ -3,10 +3,8 @@ package org.example.app.core
 import ai.koog.prompt.dsl.prompt
 import ai.koog.prompt.executor.model.PromptExecutor
 import ai.koog.prompt.message.Message
-import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
-import kotlin.io.path.writeText
 
 /**
  * test.kt:
@@ -29,23 +27,55 @@ You are a strict Python test engineer.
 Generate a SINGLE FILE named test.py.
 
 Hard requirements:
-1) The test MUST validate this contract:
+1) The test MUST validate this contract (treat it as source-of-truth):
 $contract
 
 2) Output ONLY valid Python code. No markdown fences. No explanations.
-3) The test should:
+
+3) The test MUST:
    - import model.py
-   - instantiate build_model()
-   - create dummy input X matching inputType
-   - call fit(...) (if appropriate) and predict(...)
-   - verify predict output type/shape is sensible for outputType
-   - exit code 0 on success; non-zero on failure (raise AssertionError or SystemExit(1))
+   - call build_model(config) and verify it returns a ModelWrapper
+   - run an end-to-end smoke test: fit(...) (if appropriate) then predict(...)
+   - validate that predict output is sensible for the declared outputType
+   - exit code 0 on success; non-zero on failure
+
+Additionally MUST test serialization:
+   - wrapper.save("tmp_model.json") then ModelWrapper.load("tmp_model.json")
+   - loaded model can predict with correct length/type
+If save/load are missing, fail with a clear AssertionError message.
+
+Data handling rules (VERY IMPORTANT):
+- Prefer using the real dataset at data_path if it exists.
+  * If data_path is a directory: look for the first *.csv inside.
+  * If data_path is a file: use it directly.
+  * Read CSV using ONLY Python stdlib (csv) + numpy. Do NOT require pandas.
+  * If a header exists: choose y column by name preference (case-insensitive):
+      ["target", "label", "y", "class", "species"]
+    Otherwise, if the last column is non-numeric, use it as y.
+  * X must be a numeric numpy.ndarray of shape (n_samples, n_features).
+  * y must be a 1D array-like of length n_samples when supervised.
+  * For classification, if y is string labels, map them to ints 0..K-1.
+- If dataset cannot be loaded, fall back to synthetic data appropriate for inputType/outputType.
+
+Output validation rules:
+- Classification: accept predictions as numpy array/list of length n_samples.
+  * If predictions are numeric: ensure they are finite, integer-like, and within the set of known labels if available.
+  * If predictions are strings: ensure they are within the set of known labels.
+- Regression: predictions must be numeric (float/int), finite, length n_samples.
+
+Robustness & debuggability:
+- Set numpy random seed.
+- On any exception, print full traceback.
+- If serialization fails, print diagnostics about tmp_model.json (file size + first 200 bytes/chars if readable).
+- Always clean up tmp_model.json on success.
 
 Task spec:
 - inputType = ${spec.inputType}
 - outputType = ${spec.outputType}
 - trainingType = ${spec.trainingType}
+- splitStrategy = ${spec.splitStrategy}
 - metric = ${spec.metric}
+- dataPath = ${spec.dataPath}
                 """.trimIndent()
             )
         }
@@ -89,7 +119,7 @@ class PythonRunner {
     private fun runProcess(command: List<String>, workDir: Path): PythonRunResult {
         val pb = ProcessBuilder(command)
             .directory(workDir.toFile())
-            .redirectErrorStream(true) // ✅ 关键：stderr 合并到 stdout，避免死锁
+            .redirectErrorStream(true) // ✅ stderr 合并到 stdout，避免死锁
         pb.environment()["PYTHONUNBUFFERED"] = "1"
 
         val process = pb.start()

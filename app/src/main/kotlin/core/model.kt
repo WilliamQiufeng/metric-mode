@@ -39,7 +39,15 @@ $contract
 3) The code must be runnable even if some ML libraries are missing:
    - If your chosen library cannot be imported, fallback to a minimal numpy baseline model
      while preserving the same ModelWrapper interface.
+4) Hyperparameter support (MUST):
+   - build_model(config) must APPLY config to the underlying estimator constructor.
+   - If the estimator supports random_state, default random_state=42 unless overridden.
+   - Unknown config keys must be safely ignored or filtered (do not crash).
 
+5) Persistence (MUST):
+   - ModelWrapper.save(path) and ModelWrapper.load(path) must round-trip.
+   - Prefer native save/load (xgboost save_model/load_model).
+   - Otherwise, use stdlib pickle + base64
 Task spec:
 - inputType = ${spec.inputType}
 - outputType = ${spec.outputType}
