@@ -54,7 +54,7 @@ Hard rules:
 
     val agent = ai.koog.agents.core.agent.AIAgent<String, String>(
         systemPrompt = systemPrompt,
-        promptExecutor = simpleOpenAIExecutor(System.getenv("OPENAI_TOKEN")),
+        promptExecutor = simpleOpenAIExecutor(System.getenv("OPENAI_API_KEY")),
         llmModel = OpenAIModels.Chat.GPT4o,
         toolRegistry = toolRegistry,
         strategy = functionalStrategy { input ->
