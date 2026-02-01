@@ -3,7 +3,13 @@ package org.example.app.user
 import ai.koog.agents.core.tools.annotations.LLMDescription
 import ai.koog.agents.core.tools.annotations.Tool
 import ai.koog.agents.core.tools.reflect.ToolSet
+import org.example.app.intermediate.InputType
+import org.example.app.intermediate.Metric
 import org.example.app.intermediate.ModelAutoGenChecklist
+import org.example.app.intermediate.ModelFamilyCategory
+import org.example.app.intermediate.OutputType
+import org.example.app.intermediate.SplitStrategy
+import org.example.app.intermediate.TrainingType
 
 @LLMDescription("Tools to update and validate the ModelAutoGenChecklist. Always call these instead of assuming state.")
 class ChecklistTools(
@@ -22,32 +28,58 @@ class ChecklistTools(
     private fun parseField(raw: String): ModelAutoGenChecklist.Field =
         parseEnum("Field", raw)
 
+    private inline fun <reified E : Enum<E>>withFieldParsed(enumName: String, raw: String, f: (E) -> String): String {
+        val field: E
+        try {
+            field = parseEnum(enumName, raw)
+        } catch (e: IllegalArgumentException) {
+            return e.toString()
+        }
+        return f(field)
+    }
+
     // ---- setters (call your checklist.setXxx) ----
     @Tool
     @LLMDescription("Set input type. Allowed: IMAGE, VIDEO, TABULAR, TEXT, AUDIO, OTHER.")
     fun setInputType(@LLMDescription("Enum name, e.g. TABULAR") value: String): String {
-        checklist.setInputType(parseEnum("InputType", value))
-        return checklist.snapshot()
+        return withFieldParsed<InputType>("InputType", value) {
+            checklist.setInputType(it)
+            return@withFieldParsed checklist.snapshot()
+        }
+
     }
 
     @Tool
     @LLMDescription("Set output type. Allowed: REGRESSION, CLASSIFICATION, RANKING, CLUSTERING, SEGMENTATION, GENERATION, OTHER.")
     fun setOutputType(@LLMDescription("Enum name, e.g. REGRESSION") value: String): String {
-        checklist.setOutputType(parseEnum("OutputType", value))
-        return checklist.snapshot()
+        return withFieldParsed<OutputType>("OutputType", value) {
+            checklist.setOutputType(it)
+            return@withFieldParsed checklist.snapshot()
+        }
+
     }
 
     @Tool
     @LLMDescription("Set training type. Allowed: SUPERVISED, UNSUPERVISED, REINFORCEMENT.")
     fun setTrainingType(@LLMDescription("Enum name, e.g. SUPERVISED") value: String): String {
-        checklist.setTrainingType(parseEnum("TrainingType", value))
-        return checklist.snapshot()
+        return withFieldParsed<TrainingType>("TrainingType", value) {
+            checklist.setTrainingType(it)
+            checklist.snapshot()
+        }
+
     }
 
     @Tool
     @LLMDescription("Set data path (file or directory). Use absolute path when possible.")
     fun setDataPath(@LLMDescription("Path string") path: String): String {
         checklist.setDataPath(path)
+        return checklist.snapshot()
+    }
+
+    @Tool
+    @LLMDescription("Set prediction data path (file). Use absolute path when possible.")
+    fun setPredictionDataPath(@LLMDescription("Path string") path: String): String {
+        checklist.setPredictionDataPath(path)
         return checklist.snapshot()
     }
 
@@ -60,8 +92,10 @@ class ChecklistTools(
         @LLMDescription("Enum name, e.g. STRATIFIED") strategy: String,
         @LLMDescription("Required if strategy=CUSTOM. Describe how to split.") customDesc: String? = null
     ): String {
-        checklist.setSplitStrategy(parseEnum("SplitStrategy", strategy), customDesc)
-        return checklist.snapshot()
+        return withFieldParsed<SplitStrategy>("SplitStrategy", strategy) {
+            checklist.setSplitStrategy(it, customDesc)
+            checklist.snapshot()
+        }
     }
 
     @Tool
@@ -74,30 +108,46 @@ class ChecklistTools(
         @LLMDescription("Enum name, e.g. RMSE") metric: String,
         @LLMDescription("Required if metric=CUSTOM. Define the metric.") customDesc: String? = null
     ): String {
-        checklist.setMetric(parseEnum("Metric", metric), customDesc)
-        return checklist.snapshot()
+        return withFieldParsed<Metric>("Metric", metric) { m ->
+            checklist.setMetric(m, customDesc)
+            return@withFieldParsed checklist.snapshot()
+        }
+
     }
 
     @Tool
     @LLMDescription("Set optional model family category. Allowed: LINEAR, TREE_BOOSTING, MLP, CNN, VISION_TRANSFORMER, SEQ_TRANSFORMER, RNN, GNN, DIFFUSION, RL_POLICY, OTHER.")
     fun setModelFamilyCategory(@LLMDescription("Enum name, e.g. TREE_BOOSTING") value: String): String {
-        checklist.setModelFamilyCategory(parseEnum("ModelFamilyCategory", value))
-        return checklist.snapshot()
+        return withFieldParsed<ModelFamilyCategory>("ModelFamilyCategory", value) { cat ->
+            checklist.setModelFamilyCategory(cat)
+            return@withFieldParsed checklist.snapshot()
+        }
+
     }
 
     // ---- confirm / unconfirm ----
     @Tool
     @LLMDescription("Confirm a field AFTER the user explicitly confirms the current value.")
     fun confirmField(@LLMDescription("Field name, e.g. DATA_PATH") field: String): String {
-        checklist.confirm(parseField(field))
-        return checklist.snapshot()
+        try {
+            val parsedField = parseField(field)
+            checklist.confirm(parsedField)
+            return checklist.snapshot()
+        } catch (e: IllegalArgumentException) {
+            return e.toString()
+        }
     }
 
     @Tool
     @LLMDescription("Unconfirm a field (e.g. if user says the previous confirmation was wrong).")
     fun unconfirmField(@LLMDescription("Field name, e.g. DATA_PATH") field: String): String {
-        checklist.unconfirm(parseField(field))
-        return checklist.snapshot()
+        try {
+            val parsedField = parseField(field)
+            checklist.unconfirm(parsedField)
+            return checklist.snapshot()
+        } catch (e: IllegalArgumentException) {
+            return e.toString()
+        }
     }
 
     // ---- status / gating ----
