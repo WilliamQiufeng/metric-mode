@@ -72,7 +72,7 @@ class ModelAutoGenChecklist {
         METRIC("Metric", true),
 
         // Optional: only the category is needed; can be made required if you want.
-        PREDICTION_DATA_PATH("Prediction data path", false),
+        PREDICTION_DATA_PATH("Prediction data path", true),
         MODEL_FAMILY_CATEGORY("Model family category", false)
     }
 
