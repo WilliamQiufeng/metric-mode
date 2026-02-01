@@ -146,30 +146,29 @@ class WorkflowController(
             tools(checklistTools)
             tools(CsvPreprocessTools())
             tools(PythonDataGenTools())
-            tools(quitTools)
+//            tools(quitTools)
         }
 
         val systemPrompt = """
 You are an interactive intake assistant for building a model to describe data.
+The user does not know much about machine learning, so you will have to figure out the type of model to use through
+conversation. Listen to and guide the user describing their expectations. Ask anything needed. 
+Fill in a checklist while you listen. Ask for data files like CSV. Read through the first few lines to know more about
+ it, and use tools given to check any null values and propose to fill in a default value, and also promote a column as the
+ target column to train for. After promotion, set the data path using setDataPath to point to the csv after promotion.
+ Do not call setDataPath until you have done all the steps above.
+ Ask to generate a prediction set with generateCsvFromPython. The prediction set should contain random data with 
+ the columns from the data file, but with the promoted column deleted (as well as target column).
+ Use the tool given to achieve that, and set the prediction data path in the checklist to the generated prediction set file.
+ You MUST NOT write any imports. Use only provided `np` and `pd`.
 
 Hard rules:
 1) To ask the user anything, ALWAYS call __ask_user__ (AskUser tool). Do not wait for an external "next message".
 2) Whenever the user provides info for a checklist field, call the corresponding checklist tool (setXxx).
-3) After setting a field, you MUST ask the user to confirm it explicitly, then call confirmField. If the user explicitly 
-    says one of the methods, you could call confirmField immediately, without asking.
-4) After each update or confirmation, call checkStatus and snapshot, and show snapshot to the user (use __say_to_user__).
-5) If DATA_PATH is provided, inspect it when needed using __list_directory__ / __read_file__ before confirming DATA_PATH.
+3) Use __say_to_user__ to simply give information to the user.
+4) If DATA_PATH is provided, inspect it when needed using __list_directory__ / __read_file__ before confirming DATA_PATH.
    Read ONLY the first few lines.
-6) Use CSV preprocessing tools for CSV files. Check for null values. If there is any null value, tell the user
-    about it, and ask for the value it should fill in by default.
-7) Let the user pick a column to represent the target column. Use __promote_target_column__ to do this. After this,
-    update DATA_PATH and let the user reconfirm.
-8) Keep looping until checkStatus says ok=true. Then output a final concise summary (and stop calling tools).
-9) Ask the user if they want to generate a prediction set. USE __ask_user__. If so, use the tool to achieve that, and set the prediction
-    data path in the checklist to the generated prediction set file. You MUST NOT write any imports. Use only provided `np` and `pd`.
-    You should create a variable `df` in the end. DO NOT write any network or file access.
-10) If the checklist is fully filled, or there are optional fields unfilled and the user requests to stop, call the quit
-    command to exit.
+5) Keep looping until checkStatus says ok=true. Then output a final concise summary (and stop calling tools).
 """.trimIndent()
 
         val executor = simpleOpenAIExecutor(apiKey)
@@ -188,9 +187,7 @@ Hard rules:
 
                     while (guard++ < maxSteps) {
                         // Execute any tool calls
-                        while (responses.containsToolCalls() || !quitTools.quit) {
-                            if (quitTools.quit) break
-                            if (!responses.containsToolCalls()) break
+                        while (responses.containsToolCalls()) {
                             val pending = extractToolCalls(responses)
                             val results = executeMultipleTools(pending)
                             responses = sendMultipleToolResults(results)
@@ -199,11 +196,21 @@ Hard rules:
                         // If no tool calls in the last response, decide what to do next.
                         // Use YOUR checklist as the stop condition.
                         val check = checklist.check()
-                        if (check.ok || quitTools.quit) {
+                        if (check.ok) {
                             return@functionalStrategy checklist.snapshot()
                         }
                         // If checklist is not complete, the agent will continue processing
                         // The functional strategy will handle the continuation naturally
+                        // Not OK but model produced no tool calls => push it back into tools-only mode.
+                        responses = llm.writeSession {
+                            appendPrompt {
+                                system(
+                                    "$systemPrompt Current status:\n" +
+                                            checklist.snapshot() + ". Remember to look for prediction set and promote target column."
+                                )
+                            }
+                            listOf(requestLLMOnlyCallingTools())
+                        }
                     }
 
                     "Stopped after $maxSteps steps (safety guard). Current checklist:\n${checklist.snapshot()}"
