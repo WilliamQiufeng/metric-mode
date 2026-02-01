@@ -83,7 +83,7 @@ fun main() = runBlocking {
         // keep it simple; your data agent can do proper split later
         setSplitStrategy(SplitStrategy.RANDOM)
         setMetric(Metric.ACCURACY)
-
+        setPredictionDataPath(dataDir.toString())
         // confirm required fields
         confirm(ModelAutoGenChecklist.Field.INPUT_TYPE)
         confirm(ModelAutoGenChecklist.Field.OUTPUT_TYPE)
@@ -91,6 +91,7 @@ fun main() = runBlocking {
         confirm(ModelAutoGenChecklist.Field.DATA_PATH)
         confirm(ModelAutoGenChecklist.Field.SPLIT_STRATEGY)
         confirm(ModelAutoGenChecklist.Field.METRIC)
+        confirm(ModelAutoGenChecklist.Field.PREDICTION_DATA_PATH)
     }
 
     val check = cl.check()
