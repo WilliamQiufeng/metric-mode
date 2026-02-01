@@ -64,9 +64,6 @@ data class PythonRunResult(
 )
 
 class PythonRunner {
-    /**
-     * Try python3 first, then python as fallback.
-     */
     fun runTest(workDir: Path, testFileName: String): PythonRunResult {
         val candidates = listOf("python3", "python")
 
@@ -74,7 +71,7 @@ class PythonRunner {
         for (cmd in candidates) {
             try {
                 return runProcess(
-                    command = listOf(cmd, testFileName),
+                    command = listOf(cmd, "-u", testFileName), // -u: unbuffered，保证 print/traceback 立即刷出
                     workDir = workDir
                 )
             } catch (e: Exception) {
@@ -92,20 +89,14 @@ class PythonRunner {
     private fun runProcess(command: List<String>, workDir: Path): PythonRunResult {
         val pb = ProcessBuilder(command)
             .directory(workDir.toFile())
-            .redirectErrorStream(false)
+            .redirectErrorStream(true) // ✅ 关键：stderr 合并到 stdout，避免死锁
+        pb.environment()["PYTHONUNBUFFERED"] = "1"
 
         val process = pb.start()
-
-        val stdoutBuf = ByteArrayOutputStream()
-        val stderrBuf = ByteArrayOutputStream()
-
-        process.inputStream.use { it.copyTo(stdoutBuf) }
-        process.errorStream.use { it.copyTo(stderrBuf) }
-
+        val combined = process.inputStream.bufferedReader(StandardCharsets.UTF_8).readText()
         val exit = process.waitFor()
-        val stdout = stdoutBuf.toString(StandardCharsets.UTF_8)
-        val stderr = stderrBuf.toString(StandardCharsets.UTF_8)
 
-        return PythonRunResult(exitCode = exit, stdout = stdout, stderr = stderr)
+        // stderr 留空即可（已合并）
+        return PythonRunResult(exitCode = exit, stdout = combined, stderr = "")
     }
 }

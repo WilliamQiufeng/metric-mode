@@ -12,6 +12,7 @@ dependencies {
     // Project "app" depends on project "utils". (Project paths are separated with ":", so ":utils" refers to the top-level "utils" project.)
     implementation(project(":utils"))
     implementation("ai.koog:koog-agents:0.6.1")
+    implementation("org.slf4j:slf4j-simple:2.0.13")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.10.0")
 }
 

@@ -4,6 +4,7 @@ import ai.koog.prompt.dsl.prompt
 import ai.koog.prompt.executor.model.PromptExecutor
 import ai.koog.prompt.message.Message
 import org.example.app.core.*
+import org.example.app.intermediate.*
 /**
  * model.kt:
  * Ask LLM to generate model.py that follows the stable MODEL_API_CONTRACT.
@@ -18,7 +19,7 @@ class ModelGenerator(
 ) {
     suspend fun generateModelPy(
         spec: MlAutoGenCore.ChecklistSpec,
-        family: MlAutoGenCore.ModelFamilyCategory,
+        family: ModelFamilyCategory,
         concrete: MlAutoGenCore.ConcreteModelChoice,
         contract: String,
         previousModelPy: String?,

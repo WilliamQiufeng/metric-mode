@@ -60,16 +60,6 @@ Notes:
         fun snapshot(): String
     }
 
-    enum class ModelFamilyCategory {
-        LINEAR_BASELINE,
-        TREE_BOOSTING,
-        CNN_VISION,
-        TRANSFORMER_TEXT,
-        SEQUENCE_MODEL,
-        CLUSTERING_UNSUPERVISED,
-        RL_POLICY
-    }
-
     @Serializable
     data class ModelFamilyPick(
         val family: ModelFamilyCategory,
@@ -110,19 +100,23 @@ Notes:
             return m.groupValues[1].trim()
         }
 
-        // Example snapshot lines you likely have:
-        // "Input type: IMAGE"
-        // "Output type: CATEGORY"
-        // "Training type: SUPERVISED"
-        // "Split strategy: HOLDOUT"
-        // "Metric: ACCURACY"
-        // "Data path: /path/to/data"
-        val inputType = InputType.valueOf(findValue("Input type"))
-        val outputType = OutputType.valueOf(findValue("Output type"))
-        val trainingType = TrainingType.valueOf(findValue("Training type"))
-        val splitStrategy = SplitStrategy.valueOf(findValue("Split strategy"))
-        val metric = Metric.valueOf(findValue("Metric"))
-        val dataPath = findValue("Data path")
+        // Remove trailing status like "(Confirmed)" / "(Not confirmed)" / "(Not set)"
+        fun stripTrailingStatus(raw: String): String =
+            raw.replace(Regex("""\s*\([^()]*\)\s*$"""), "").trim()
+
+        // Handle cases like "CUSTOM(desc...)" by taking only the enum name before '('
+        fun enumName(raw: String): String {
+            val v = stripTrailingStatus(raw)
+            val idx = v.indexOf('(')
+            return if (idx >= 0) v.substring(0, idx).trim() else v
+        }
+
+        val inputType = InputType.valueOf(enumName(findValue("Input type")))
+        val outputType = OutputType.valueOf(enumName(findValue("Output type")))
+        val trainingType = TrainingType.valueOf(enumName(findValue("Training type")))
+        val splitStrategy = SplitStrategy.valueOf(enumName(findValue("Split strategy")))
+        val metric = Metric.valueOf(enumName(findValue("Metric")))
+        val dataPath = stripTrailingStatus(findValue("Data path"))
 
         return ChecklistSpec(
             inputType = inputType,
@@ -238,18 +232,32 @@ Now pick one.
         }
 
         val spec = specFromSnapshot(checklist.snapshot())
-
         Files.createDirectories(workDir)
 
         val familyPick = pickModelFamily(spec)
         val concrete = pickConcreteModel(spec, familyPick.family)
 
-        // Generate test.py once (it tests the stable contract).
         val testPy = TestGenerator(executor, llmModel).generateTestPy(spec, MODEL_API_CONTRACT)
         val testPath = workDir.resolve("test.py")
         testPath.writeText(testPy)
 
         val pythonRunner = PythonRunner()
+
+        // NEW: dependency manager + installed set
+        val depManager = PythonDependencyManager(
+            executor = executor,
+            llmModel = llmModel,
+            fixerModel = fixerModel
+        )
+        val installedDeps = mutableSetOf<String>()
+
+        // NEW: pre-install what the picker already suggested (if any)
+        if (concrete.extraDependencies.isNotEmpty()) {
+            val pre = concrete.extraDependencies.filter { it.isNotBlank() }.distinct()
+            val r = depManager.pipInstall(pre, workDir)
+            if (r.exitCode == 0) installedDeps.addAll(pre)
+            // if pip fails, we don't hard-fail here; next loop can still attempt LLM inference based on error output
+        }
 
         var lastErr: String? = null
         var lastModelPy: String? = null
@@ -266,7 +274,56 @@ Now pick one.
             val modelPath = workDir.resolve("model.py")
             modelPath.writeText(modelPy)
 
-            val runResult = pythonRunner.runTest(workDir = workDir, testFileName = "test.py")
+            // --- Run test once ---
+            var runResult = pythonRunner.runTest(workDir = workDir, testFileName = "test.py")
+
+            // NEW: after each run (success/failure), ask LLM to infer deps, then pip install missing ones
+            suspend fun inferAndInstallIfNeeded(): Boolean {
+                val plan = depManager.proposeDependencies(
+                    spec = spec,
+                    family = familyPick.family,
+                    concrete = concrete,
+                    modelPy = modelPy,
+                    testPy = testPy,
+                    lastStdout = runResult.stdout,
+                    lastStderr = runResult.stderr
+                )
+
+                val toInstall = plan.pipPackages
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .filterNot { installedDeps.contains(it) }
+                    .distinct()
+
+                if (toInstall.isEmpty()) return false
+
+                val pipRes = depManager.pipInstall(toInstall, workDir)
+                if (pipRes.exitCode == 0) {
+                    installedDeps.addAll(toInstall)
+                    return true
+                }
+
+                // If pip failed, append pip error into lastErr so the next regeneration sees it.
+                lastErr = buildString {
+                    appendLine(runResult.stderr.ifBlank { runResult.stdout })
+                    appendLine()
+                    appendLine("pip install failed:")
+                    appendLine(pipRes.stderr.ifBlank { pipRes.stdout })
+                }.trim()
+
+                return false
+            }
+
+            // Try install deps inferred from this run, then (if installed) rerun tests ONCE.
+            val installedSomething = inferAndInstallIfNeeded()
+            if (installedSomething) {
+                runResult = pythonRunner.runTest(workDir = workDir, testFileName = "test.py")
+
+                // (Optional but aligns with your request: "每次跑完都识别依赖")
+                // Do one more inference pass after rerun; typically returns empty list.
+                inferAndInstallIfNeeded()
+            }
+
             if (runResult.exitCode == 0) {
                 return PipelineResult.Success(
                     workDir = workDir.toString(),

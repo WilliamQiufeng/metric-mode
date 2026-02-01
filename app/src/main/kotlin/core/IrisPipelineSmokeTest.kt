@@ -31,7 +31,32 @@ private fun downloadIfMissing(url: String, dest: Path) {
     dest.writeBytes(bytes)
 }
 
+fun ModelAutoGenChecklist.asCoreChecklistLike(): MlAutoGenCore.ChecklistLike =
+    object : MlAutoGenCore.ChecklistLike {
+        override fun check(): Boolean = this@asCoreChecklistLike.check().ok
+        override fun snapshot(): String = this@asCoreChecklistLike.snapshot()
+    }
+
 fun main() = runBlocking {
+    try {
+        println("OPENAI_API_KEY present? " + !System.getenv("OPENAI_API_KEY").isNullOrBlank())
+
+        // 你原来的 main 内容从这里开始
+        val apiKey =
+            System.getenv("OPENAI_API_KEY")
+                ?: System.getProperty("OPENAI_API_KEY")
+                ?: error("Missing OPENAI_API_KEY")
+
+        val executor = simpleOpenAIExecutor(apiKey)
+        executor.use {
+            val core = MlAutoGenCore(executor = it)
+            // ... 你的 checklist + core.run(...)
+        }
+
+    } catch (t: Throwable) {
+        t.printStackTrace()   // 关键：把真正错误打印出来
+        throw t               // 让 Gradle 仍然失败，但你能看到原因
+    }
     // 1) Ensure API key exists (Koog OpenAI executor needs it)
     val apiKey = System.getenv("OPENAI_API_KEY")
         ?: error("Missing OPENAI_API_KEY env var. Set it before running this test.")
@@ -76,10 +101,13 @@ fun main() = runBlocking {
     // 4) Run your pipeline (core -> generate model.py, test -> generate test.py, then run python test.py)
     val executor = simpleOpenAIExecutor(apiKey)
     executor.use {
-        val core = Core(executor = it) // if your Core constructor differs, adjust here
+        val core = MlAutoGenCore(executor = it) // if your Core constructor differs, adjust here
 
         val workDir = projectRoot.resolve("generated_iris_pipeline")
-        val result = core.run(checklist = cl, workDir = workDir, maxModelRetries = 3)
+        val result = core.run(
+            checklist = cl.asCoreChecklistLike(),
+            workDir = Path.of("generated_ml")
+        )
 
         // 5) Assert success
         when (result) {
@@ -90,7 +118,7 @@ fun main() = runBlocking {
                 if (result.stderr.isNotBlank()) println("stderr:\n${result.stderr}")
             }
             is PipelineResult.Failed -> {
-                error("❌ Pipeline failed: ${result.reason}\nLastError=${result.lastError}\nSnapshot:\n${result.snapshot}")
+                error("❌ Pipeline failed: ${result.reason}\nLastError=${result.lastError}\n")
             }
         }
     }
