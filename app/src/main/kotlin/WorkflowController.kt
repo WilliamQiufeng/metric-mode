@@ -1,0 +1,388 @@
+package org.example.app
+
+import ai.koog.agents.core.agent.AIAgent
+import ai.koog.agents.core.agent.functionalStrategy
+import ai.koog.agents.core.dsl.extension.containsToolCalls
+import ai.koog.agents.core.dsl.extension.executeMultipleTools
+import ai.koog.agents.core.dsl.extension.extractToolCalls
+import ai.koog.agents.core.dsl.extension.requestLLMOnlyCallingTools
+import ai.koog.agents.core.dsl.extension.sendMultipleToolResults
+import ai.koog.agents.core.tools.ToolRegistry
+import ai.koog.agents.core.tools.reflect.tools
+import ai.koog.agents.ext.tool.AskUser
+import ai.koog.agents.ext.tool.SayToUser
+import ai.koog.agents.ext.tool.file.ListDirectoryTool
+import ai.koog.agents.ext.tool.file.ReadFileTool
+import ai.koog.prompt.executor.clients.openai.OpenAIModels
+import ai.koog.prompt.executor.llms.all.simpleOpenAIExecutor
+import ai.koog.rag.base.files.JVMFileSystemProvider
+import kotlinx.coroutines.runBlocking
+import org.example.app.core.MlAutoGenCore
+import org.example.app.core.PipelineResult
+import org.example.app.intermediate.ModelAutoGenChecklist
+import org.example.app.result.*
+import org.example.app.user.ChecklistTools
+import org.example.app.user.CsvPreprocessTools
+import org.example.app.user.PythonDataGenTools
+import org.example.app.user.QuitTools
+import java.nio.file.Path
+import java.nio.file.Paths
+import kotlin.io.path.exists
+
+/**
+ * WorkflowController orchestrates the entire ML pipeline workflow:
+ * 1. User interaction to build checklist
+ * 2. Core model generation (model.py and test.py)
+ * 3. Result pipeline (tune -> final_train -> prediction -> explanation -> report)
+ */
+class WorkflowController(
+    private val workDir: Path = Paths.get("generated_ml"),
+    private val apiKey: String = System.getenv("OPENAI_API_KEY") ?: error("Missing OPENAI_API_KEY env var")
+) {
+    /**
+     * Extension function to convert ModelAutoGenChecklist to MlAutoGenCore.ChecklistLike
+     */
+    private fun ModelAutoGenChecklist.asCoreChecklistLike(): MlAutoGenCore.ChecklistLike =
+        object : MlAutoGenCore.ChecklistLike {
+            override fun check(): Boolean = this@asCoreChecklistLike.check().ok
+            override fun snapshot(): String = this@asCoreChecklistLike.snapshot()
+        }
+
+    /**
+     * Extract prediction data path from checklist snapshot
+     */
+    private fun extractPredictionDataPath(snapshot: String): String? {
+        val regex = Regex("""Prediction data path.*?:\s*(.+?)\s*\([^()]*\)""", RegexOption.MULTILINE)
+        val match = regex.find(snapshot)
+        return match?.groupValues?.get(1)?.trim()?.takeIf { it.isNotBlank() && it != "null" }
+    }
+
+    /**
+     * Run the complete workflow
+     */
+    suspend fun run(): WorkflowResult {
+        println("=== Starting ML Pipeline Workflow ===\n")
+
+        // Step 1: User interaction to build checklist
+        println("Step 1: Building checklist through user interaction...")
+        val checklist = buildChecklist()
+        
+        val checkResult = checklist.check()
+        if (!checkResult.ok) {
+            return WorkflowResult.Failed(
+                stage = "Checklist",
+                reason = "Checklist is not complete. Missing: ${checkResult.missing}, Unconfirmed: ${checkResult.unconfirmed}",
+                checklistSnapshot = checklist.snapshot()
+            )
+        }
+
+        println("\n✓ Checklist is complete!")
+        println(checklist.snapshot())
+
+        // Step 2: Core model generation
+        println("\n=== Step 2: Generating model.py and test.py ===")
+        val executor = simpleOpenAIExecutor(apiKey)
+        executor.use {
+            val core = MlAutoGenCore(executor = it)
+            val coreChecklist = checklist.asCoreChecklistLike()
+            
+            val coreResult = core.run(
+                checklist = coreChecklist,
+                workDir = workDir,
+                maxModelRetries = 5
+            )
+
+            when (coreResult) {
+                is PipelineResult.Success -> {
+                    println("✓ Model generation successful!")
+                    println("  - Model family: ${coreResult.family.family}")
+                    println("  - Concrete model: ${coreResult.concrete.library}/${coreResult.concrete.modelId}")
+                    println("  - Work directory: ${coreResult.workDir}")
+
+                    // Step 3: Result pipeline
+                    println("\n=== Step 3: Running result pipeline ===")
+                    val spec = core.specFromSnapshot(checklist.snapshot())
+                    val predictionDataPath = extractPredictionDataPath(checklist.snapshot())
+                    
+                    return runResultPipeline(
+                        executor = it,
+                        workDir = Paths.get(coreResult.workDir),
+                        spec = spec,
+                        family = coreResult.family,
+                        concrete = coreResult.concrete,
+                        predictionDataPath = predictionDataPath
+                    )
+                }
+                is PipelineResult.Failed -> {
+                    return WorkflowResult.Failed(
+                        stage = "Core Model Generation",
+                        reason = coreResult.reason,
+                        checklistSnapshot = coreResult.checklistSnapshot,
+                        lastError = coreResult.lastError
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Step 1: Build checklist through user interaction
+     */
+    private suspend fun buildChecklist(): ModelAutoGenChecklist {
+        val checklist = ModelAutoGenChecklist()
+        val checklistTools = ChecklistTools(checklist)
+        val quitTools = QuitTools()
+
+        val toolRegistry = ToolRegistry {
+            // CLI I/O tools
+            tool(SayToUser)
+            tool(AskUser)
+
+            // Local file inspection
+            tool(ReadFileTool(JVMFileSystemProvider.ReadOnly))
+            tool(ListDirectoryTool(JVMFileSystemProvider.ReadOnly))
+
+            // Your checklist mutation tools
+            tools(checklistTools)
+            tools(CsvPreprocessTools())
+            tools(PythonDataGenTools())
+            tools(quitTools)
+        }
+
+        val systemPrompt = """
+You are an interactive intake assistant for building a model to describe data.
+
+Hard rules:
+1) To ask the user anything, ALWAYS call __ask_user__ (AskUser tool). Do not wait for an external "next message".
+2) Whenever the user provides info for a checklist field, call the corresponding checklist tool (setXxx).
+3) After setting a field, you MUST ask the user to confirm it explicitly, then call confirmField. If the user explicitly 
+    says one of the methods, you could call confirmField immediately, without asking.
+4) After each update or confirmation, call checkStatus and snapshot, and show snapshot to the user (use __say_to_user__).
+5) If DATA_PATH is provided, inspect it when needed using __list_directory__ / __read_file__ before confirming DATA_PATH.
+   Read ONLY the first few lines.
+6) Use CSV preprocessing tools for CSV files. Check for null values. If there is any null value, tell the user
+    about it, and ask for the value it should fill in by default.
+7) Let the user pick a column to represent the target column. Use __promote_target_column__ to do this. After this,
+    update DATA_PATH and let the user reconfirm.
+8) Keep looping until checkStatus says ok=true. Then output a final concise summary (and stop calling tools).
+9) Ask the user if they want to generate a prediction set. USE __ask_user__. If so, use the tool to achieve that, and set the prediction
+    data path in the checklist to the generated prediction set file. You MUST NOT write any imports. Use only provided `np` and `pd`.
+    You should create a variable `df` in the end. DO NOT write any network or file access.
+10) If the checklist is fully filled, or there are optional fields unfilled and the user requests to stop, call the quit
+    command to exit.
+""".trimIndent()
+
+        val executor = simpleOpenAIExecutor(apiKey)
+        executor.use {
+            val agent = AIAgent<String, String>(
+                systemPrompt = systemPrompt,
+                promptExecutor = it,
+                llmModel = OpenAIModels.Chat.GPT4o,
+                toolRegistry = toolRegistry,
+                strategy = functionalStrategy { input ->
+                    // 1) Kick off with tools-only so the model must use AskUser/SayToUser/etc.
+                    var responses = listOf(requestLLMOnlyCallingTools(input))
+
+                    var guard = 0
+                    val maxSteps = 200
+
+                    while (guard++ < maxSteps) {
+                        // Execute any tool calls
+                        while (responses.containsToolCalls() || !quitTools.quit) {
+                            if (quitTools.quit) break
+                            if (!responses.containsToolCalls()) break
+                            val pending = extractToolCalls(responses)
+                            val results = executeMultipleTools(pending)
+                            responses = sendMultipleToolResults(results)
+                        }
+
+                        // If no tool calls in the last response, decide what to do next.
+                        // Use YOUR checklist as the stop condition.
+                        val check = checklist.check()
+                        if (check.ok || quitTools.quit) {
+                            return@functionalStrategy checklist.snapshot()
+                        }
+                        // If checklist is not complete, the agent will continue processing
+                        // The functional strategy will handle the continuation naturally
+                    }
+
+                    "Stopped after $maxSteps steps (safety guard). Current checklist:\n${checklist.snapshot()}"
+                }
+            )
+
+            val final = agent.run("Start the intake. Ask me questions until the checklist is complete.")
+            println("\n=== FINAL AGENT OUTPUT ===\n$final")
+            println("\n=== FINAL CHECKLIST SNAPSHOT ===\n${checklist.snapshot()}")
+        }
+
+        return checklist
+    }
+
+    /**
+     * Step 3: Run the result pipeline (tune -> final_train -> prediction -> explanation -> report)
+     */
+    private suspend fun runResultPipeline(
+        executor: ai.koog.prompt.executor.model.PromptExecutor,
+        workDir: Path,
+        spec: MlAutoGenCore.ChecklistSpec,
+        family: MlAutoGenCore.ModelFamilyPick,
+        concrete: MlAutoGenCore.ConcreteModelChoice,
+        predictionDataPath: String?
+    ): WorkflowResult {
+        val llmModel = OpenAIModels.Chat.GPT4oMini
+        val fixerModel = OpenAIModels.Chat.GPT4o
+
+        // 3.1: Tune
+        println("\n3.1: Running tune...")
+        val tuneOrchestrator = TuneOrchestrator(executor, llmModel)
+        val tuneResult = tuneOrchestrator.runTune(
+            workDir = workDir,
+            spec = spec,
+            maxRetries = 3
+        )
+
+        when (tuneResult) {
+            is TuneOrchestrator.TuneResult.Success -> {
+                println("✓ Tune successful!")
+            }
+            is TuneOrchestrator.TuneResult.Failed -> {
+                return WorkflowResult.Failed(
+                    stage = "Tune",
+                    reason = tuneResult.reason,
+                    lastError = tuneResult.lastOutput
+                )
+            }
+        }
+
+        // 3.2: Final Train
+        println("\n3.2: Running final train...")
+        val finalTrainOrchestrator = FinalTrainOrchestrator(executor, llmModel)
+        val finalTrainResult = finalTrainOrchestrator.runFinalTrain(
+            workDir = workDir,
+            spec = spec,
+            maxRetries = 3
+        )
+
+        when (finalTrainResult) {
+            is FinalTrainOrchestrator.FinalTrainResult.Success -> {
+                println("✓ Final train successful!")
+            }
+            is FinalTrainOrchestrator.FinalTrainResult.Failed -> {
+                return WorkflowResult.Failed(
+                    stage = "Final Train",
+                    reason = finalTrainResult.reason,
+                    lastError = finalTrainResult.lastOutput
+                )
+            }
+        }
+
+        // 3.3: Prediction (if prediction data path is available)
+        var predictionResult: PredictionOrchestrator.PredictionResult? = null
+        if (predictionDataPath != null) {
+            println("\n3.3: Running prediction...")
+            val predictionOrchestrator = PredictionOrchestrator(executor, llmModel)
+            predictionResult = predictionOrchestrator.runPrediction(
+                workDir = workDir,
+                spec = spec,
+                predictionDataPath = predictionDataPath,
+                maxRetries = 2
+            )
+
+            when (predictionResult) {
+                is PredictionOrchestrator.PredictionResult.Success -> {
+                    println("✓ Prediction successful!")
+                }
+                is PredictionOrchestrator.PredictionResult.Failed -> {
+                    println("⚠ Prediction failed: ${predictionResult.reason}")
+                    // Continue with explanation and report even if prediction fails
+                }
+            }
+        } else {
+            println("\n3.3: Skipping prediction (no prediction data path provided)")
+        }
+
+        // 3.4: Explanation
+        println("\n3.4: Generating explanation...")
+        val explanationGenerator = ExplanationGenerator(executor, llmModel, fixerModel)
+        val explanationPath = explanationGenerator.generate(
+            workDir = workDir,
+            spec = spec,
+            family = family.family,
+            concrete = concrete
+        )
+        println("✓ Explanation generated at: $explanationPath")
+
+        // 3.5: Report
+        println("\n3.5: Generating report...")
+        val reportGenerator = ReportGenerator(executor, llmModel, fixerModel)
+        val reportArtifacts = reportGenerator.generatePipelineReport(
+            workDir = workDir,
+            spec = spec,
+            tuneStdout = (tuneResult as? TuneOrchestrator.TuneResult.Success)?.stdout,
+            tuneJson = (tuneResult as? TuneOrchestrator.TuneResult.Success)?.parsedJson,
+            finalTrainStdout = (finalTrainResult as? FinalTrainOrchestrator.FinalTrainResult.Success)?.stdout,
+            finalTrainJson = (finalTrainResult as? FinalTrainOrchestrator.FinalTrainResult.Success)?.parsedJson,
+            predictionStdout = (predictionResult as? PredictionOrchestrator.PredictionResult.Success)?.stdout,
+            predictionJson = (predictionResult as? PredictionOrchestrator.PredictionResult.Success)?.parsedJson
+        )
+        println("✓ Report generated:")
+        println("  - Markdown: ${reportArtifacts.markdownPath}")
+        println("  - PDF: ${reportArtifacts.pdfPath}")
+
+        return WorkflowResult.Success(
+            workDir = workDir.toString(),
+            explanationPath = explanationPath.toString(),
+            reportMarkdownPath = reportArtifacts.markdownPath.toString(),
+            reportPdfPath = reportArtifacts.pdfPath.toString()
+        )
+    }
+
+    /**
+     * Result of the workflow execution
+     */
+    sealed class WorkflowResult {
+        data class Success(
+            val workDir: String,
+            val explanationPath: String,
+            val reportMarkdownPath: String,
+            val reportPdfPath: String
+        ) : WorkflowResult()
+
+        data class Failed(
+            val stage: String,
+            val reason: String,
+            val checklistSnapshot: String? = null,
+            val lastError: String? = null
+        ) : WorkflowResult()
+    }
+}
+
+/**
+ * Main entry point for the workflow controller
+ */
+fun main() = runBlocking {
+    val controller = WorkflowController()
+    val result = controller.run()
+
+    when (result) {
+        is WorkflowController.WorkflowResult.Success -> {
+            println("\n=== Workflow Completed Successfully ===")
+            println("Work directory: ${result.workDir}")
+            println("Explanation: ${result.explanationPath}")
+            println("Report (MD): ${result.reportMarkdownPath}")
+            println("Report (PDF): ${result.reportPdfPath}")
+        }
+        is WorkflowController.WorkflowResult.Failed -> {
+            println("\n=== Workflow Failed ===")
+            println("Stage: ${result.stage}")
+            println("Reason: ${result.reason}")
+            if (result.lastError != null) {
+                println("Last Error: ${result.lastError}")
+            }
+            if (result.checklistSnapshot != null) {
+                println("\nChecklist Snapshot:\n${result.checklistSnapshot}")
+            }
+            System.exit(1)
+        }
+    }
+}
