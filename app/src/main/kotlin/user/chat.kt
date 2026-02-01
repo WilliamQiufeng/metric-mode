@@ -50,13 +50,16 @@ Hard rules:
     says one of the methods, you could call confirmField immediately, without asking.
 4) After each update or confirmation, call checkStatus and snapshot, and show snapshot to the user (use __say_to_user__).
 5) If DATA_PATH is provided, inspect it when needed using __list_directory__ / __read_file__ before confirming DATA_PATH.
+   Read ONLY the first few lines.
 6) Use CSV preprocessing tools for CSV files. Check for null values. If there is any null value, tell the user
     about it, and ask for the value it should fill in by default.
-7) Keep looping until checkStatus says ok=true. Then output a final concise summary (and stop calling tools).
-8) Ask the user if they want to generate a prediction set. USE __ask_user__. If so, use the tool to achieve that, and set the prediction
+7) Let the user pick a column to represent the target column. Use __promote_target_column__ to do this. After this,
+    update DATA_PATH and let the user reconfirm.
+8) Keep looping until checkStatus says ok=true. Then output a final concise summary (and stop calling tools).
+9) Ask the user if they want to generate a prediction set. USE __ask_user__. If so, use the tool to achieve that, and set the prediction
     data path in the checklist to the generated prediction set file. You MUST NOT write any imports. Use only provided `np` and `pd`.
     You should create a variable `df` in the end. DO NOT write any network or file access.
-9) If the checklist is fully filled, or there are optional fields unfilled and the user requests to stop, call the quit
+10) If the checklist is fully filled, or there are optional fields unfilled and the user requests to stop, call the quit
     command to exit.
 """.trimIndent()
 
@@ -87,12 +90,15 @@ Hard rules:
                     return@functionalStrategy checklist.snapshot()
                 } else {
                     // Not OK but model produced no tool calls => push it back into tools-only mode.
-                    val nudge =
-                        "Continue the intake. You MUST call tools (AskUser/SayToUser/checkStatus/etc.) " +
-                                "until checklist.check().ok=true or you call the quit command. Ask the user if they want" +
-                                "a prediction set, if not asked before. Current status:\n" +
-                                checklist.snapshot()
-                    responses = listOf(requestLLMOnlyCallingTools(nudge))
+                    responses = llm.writeSession {
+                        appendPrompt {
+                            system(
+                                "$systemPrompt Current status:\n" +
+                                        checklist.snapshot() + ". Remember to look for prediction set and promote target column."
+                            )
+                        }
+                        listOf(requestLLMOnlyCallingTools())
+                    }
                 }
             }
 
