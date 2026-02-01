@@ -22,6 +22,7 @@ import org.example.app.intermediate.*
 fun main() = runBlocking {
     val checklist = ModelAutoGenChecklist()
     val checklistTools = ChecklistTools(checklist)
+    val quitTools = QuitTools()
 
     val toolRegistry = ToolRegistry {
         // CLI I/O tools
@@ -35,6 +36,8 @@ fun main() = runBlocking {
         // Your checklist mutation tools
         tools(checklistTools)
         tools(CsvPreprocessTools())
+        tools(PythonDataGenTools())
+        tools(quitTools)
     }
 
     val systemPrompt = """
@@ -49,7 +52,12 @@ Hard rules:
 5) If DATA_PATH is provided, inspect it when needed using __list_directory__ / __read_file__ before confirming DATA_PATH.
 6) Use CSV preprocessing tools for CSV files. Check for null values. If there is any null value, tell the user
     about it, and ask for the value it should fill in by default.
-6) Keep looping until checkStatus says ok=true. Then output a final concise summary (and stop calling tools).
+7) Keep looping until checkStatus says ok=true. Then output a final concise summary (and stop calling tools).
+8) Ask the user if they want to generate a prediction set. USE __ask_user__. If so, use the tool to achieve that, and set the prediction
+    data path in the checklist to the generated prediction set file. You MUST NOT write any imports. Use only provided `np` and `pd`.
+    You should create a variable `df` in the end. DO NOT write any network or file access.
+9) If the checklist is fully filled, or there are optional fields unfilled and the user requests to stop, call the quit
+    command to exit.
 """.trimIndent()
 
     val agent = ai.koog.agents.core.agent.AIAgent<String, String>(
@@ -66,7 +74,7 @@ Hard rules:
 
             while (guard++ < maxSteps) {
                 // Execute any tool calls
-                while (responses.containsToolCalls()) {
+                while (responses.containsToolCalls() || !quitTools.quit) {
                     val pending = extractToolCalls(responses)
                     val results = executeMultipleTools(pending)
                     responses = sendMultipleToolResults(results)
@@ -75,13 +83,14 @@ Hard rules:
                 // If no tool calls in the last response, decide what to do next.
                 // Use YOUR checklist as the stop condition.
                 val check = checklist.check()
-                if (check.ok) {
+                if (check.ok || quitTools.quit) {
                     return@functionalStrategy checklist.snapshot()
                 } else {
                     // Not OK but model produced no tool calls => push it back into tools-only mode.
                     val nudge =
                         "Continue the intake. You MUST call tools (AskUser/SayToUser/checkStatus/etc.) " +
-                                "until checklist.check().ok=true. Current status:\n" +
+                                "until checklist.check().ok=true or you call the quit command. Ask the user if they want" +
+                                "a prediction set, if not asked before. Current status:\n" +
                                 checklist.snapshot()
                     responses = listOf(requestLLMOnlyCallingTools(nudge))
                 }
