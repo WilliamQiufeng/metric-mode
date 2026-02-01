@@ -22,10 +22,8 @@ class CsvPreprocessTools : ToolSet {
         val out = p.inputStream.bufferedReader().readText()
         val code = p.waitFor()
         if (code != 0) {
-            throw IllegalStateException(
-                "Python failed (exit=$code). Output:\n$out\n" +
+            return "Python failed (exit=$code). Output:\n$out\n" +
                         "Make sure python3 + pandas are installed (pip install pandas)."
-            )
         }
         return out.trim()
     }
@@ -136,6 +134,7 @@ if target not in df.columns:
 
 cols = [c for c in df.columns if c != target] + [target]
 df = df[cols]
+df = df.rename(columns={target: "target"})
 
 if not out_path:
     base, ext = os.path.splitext(path)
