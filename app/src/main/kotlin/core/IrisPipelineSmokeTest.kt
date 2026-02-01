@@ -24,7 +24,7 @@ import org.example.app.intermediate.ModelAutoGenChecklist
 private const val IRIS_CSV_URL =
     "https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv"
 
-private fun readMetricValue(candidateDir: String): Double? {
+fun readMetricValue(candidateDir: String): Double? {
     val p = Path.of(candidateDir).resolve("metrics.json")
     if (!p.exists()) return null
     val txt = Files.readString(p)
@@ -32,7 +32,7 @@ private fun readMetricValue(candidateDir: String): Double? {
     return m.groupValues[1].toDoubleOrNull()
 }
 
-private fun pickBest(outcomes: List<MlAutoGenCore.CandidateOutcome>): MlAutoGenCore.CandidateOutcome? {
+fun pickBest(outcomes: List<MlAutoGenCore.CandidateOutcome>): MlAutoGenCore.CandidateOutcome? {
     val successes = outcomes.filter { it.result is MlAutoGenCore.CandidateResult.Success }
     if (successes.isEmpty()) return null
     return successes.maxByOrNull { o -> readMetricValue(o.workDir) ?: Double.NEGATIVE_INFINITY }

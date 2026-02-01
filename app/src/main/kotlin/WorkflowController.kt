@@ -19,6 +19,8 @@ import ai.koog.rag.base.files.JVMFileSystemProvider
 import kotlinx.coroutines.runBlocking
 import org.example.app.core.MlAutoGenCore
 import org.example.app.core.PipelineResult
+import org.example.app.core.pickBest
+import org.example.app.core.readMetricValue
 import org.example.app.intermediate.ModelAutoGenChecklist
 import org.example.app.result.*
 import org.example.app.user.ChecklistTools
@@ -93,25 +95,44 @@ class WorkflowController(
             )
 
             when (coreResult) {
-                is PipelineResult.Success -> {
-                    println("✓ Model generation successful!")
-                    println("  - Model family: ${coreResult.family.family}")
-                    println("  - Concrete model: ${coreResult.concrete.library}/${coreResult.concrete.modelId}")
-                    println("  - Work directory: ${coreResult.workDir}")
+                is PipelineResult.Multi -> {
+                    println("=== Pipeline finished: ${coreResult.outcomes.size} candidates ===")
 
-                    // Step 3: Result pipeline
-                    println("\n=== Step 3: Running result pipeline ===")
+                    coreResult.outcomes.forEach { o ->
+                        val tag = "candidate#${o.index} ${o.concrete.library}/${o.concrete.modelId}"
+                        when (val r = o.result) {
+                            is MlAutoGenCore.CandidateResult.Success -> {
+                                val mv = readMetricValue(o.workDir)
+                                println("✅ $tag SUCCESS dir=${o.workDir} metric=${mv ?: "NA"}")
+                                println("stdout:\n${r.stdout}")
+                                if (r.stderr.isNotBlank()) println("stderr:\n${r.stderr}")
+                            }
+                            is MlAutoGenCore.CandidateResult.Failed -> {
+                                println("❌ $tag FAILED dir=${o.workDir}")
+                                println("reason=${r.reason}")
+                                if (!r.lastError.isNullOrBlank()) println("LastError:\n${r.lastError}")
+                            }
+                        }
+                        println("------------------------------------------------------------")
+                    }
+
+                    val best = pickBest(coreResult.outcomes)
                     val spec = core.specFromSnapshot(checklist.snapshot())
                     val predictionDataPath = extractPredictionDataPath(checklist.snapshot())
-                    
-                    return runResultPipeline(
-                        executor = it,
-                        workDir = Paths.get(coreResult.workDir),
-                        spec = spec,
-                        family = coreResult.family,
-                        concrete = coreResult.concrete,
-                        predictionDataPath = predictionDataPath
-                    )
+                    if (best == null) {
+                        error("❌ All candidates failed.")
+                    } else {
+                        val mv = readMetricValue(best.workDir)
+                        println("🏆 BEST = candidate#${best.index} ${best.concrete.library}/${best.concrete.modelId} dir=${best.workDir} metric=${mv ?: "NA"}")
+                        return runResultPipeline(
+                            executor = it,
+                            workDir = Paths.get(best.workDir),
+                            spec = spec,
+                            family = best.family,
+                            concrete = best.concrete,
+                            predictionDataPath = predictionDataPath
+                        )
+                    }
                 }
                 is PipelineResult.Failed -> {
                     return WorkflowResult.Failed(
