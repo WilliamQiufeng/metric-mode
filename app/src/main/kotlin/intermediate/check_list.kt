@@ -72,6 +72,7 @@ class ModelAutoGenChecklist {
         METRIC("Metric", true),
 
         // Optional: only the category is needed; can be made required if you want.
+        PREDICTION_DATA_PATH("Prediction data path", false),
         MODEL_FAMILY_CATEGORY("Model family category", false)
     }
 
@@ -84,7 +85,7 @@ class ModelAutoGenChecklist {
     private var metric: Metric? = null
     private var metricCustomDesc: String? = null
     private var modelFamilyCategory: ModelFamilyCategory? = null
-
+    private var predictionDataPath: Path? = null
     /**
      * Confirmed fields.
      * Whenever a field is updated, its confirmation is cleared and must be re-confirmed.
@@ -129,6 +130,11 @@ class ModelAutoGenChecklist {
         confirmed.remove(Field.MODEL_FAMILY_CATEGORY)
     }
 
+    fun setPredictionDataPath(path: String) {
+        predictionDataPath = Paths.get(path)
+        confirmed.remove(Field.PREDICTION_DATA_PATH)
+    }
+
     // ---------------- Confirm interfaces ----------------
     fun confirm(field: Field) {
         // A field must be filled before it can be confirmed.
@@ -151,6 +157,8 @@ class ModelAutoGenChecklist {
             }
             Field.MODEL_FAMILY_CATEGORY ->
                 requireNotNull(modelFamilyCategory) { "${field.label} is not set; cannot confirm" }
+            Field.PREDICTION_DATA_PATH ->
+                requireNotNull(predictionDataPath) { "${field.label} is not set; cannot confirm" }
         }
         confirmed.add(field)
     }
@@ -180,6 +188,7 @@ class ModelAutoGenChecklist {
             Field.METRIC ->
                 metric == null || (metric == Metric.CUSTOM && metricCustomDesc.isNullOrBlank())
             Field.MODEL_FAMILY_CATEGORY -> modelFamilyCategory == null
+            Field.PREDICTION_DATA_PATH -> predictionDataPath == null
         }
 
         // Collect missing required fields.
@@ -219,6 +228,7 @@ class ModelAutoGenChecklist {
                     " (${status(Field.METRIC)})"
         )
         appendLine("Model family category (optional): $modelFamilyCategory (${status(Field.MODEL_FAMILY_CATEGORY)})")
+        appendLine("Prediction data path (optional): $predictionDataPath (${status(Field.PREDICTION_DATA_PATH)})")
     }
 
     private fun status(field: Field): String {
@@ -232,6 +242,7 @@ class ModelAutoGenChecklist {
             Field.METRIC ->
                 metric != null && !(metric == Metric.CUSTOM && metricCustomDesc.isNullOrBlank())
             Field.MODEL_FAMILY_CATEGORY -> modelFamilyCategory != null
+            Field.PREDICTION_DATA_PATH -> predictionDataPath != null
         }
         return when {
             !filled -> "Not set"
