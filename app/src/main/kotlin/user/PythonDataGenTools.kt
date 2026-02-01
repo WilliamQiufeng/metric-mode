@@ -119,13 +119,16 @@ print(json.dumps({
     "cols": int(df.shape[1])
 }, ensure_ascii=False))
 """.trimIndent()
-
-        val seedArg = seed?.toString() ?: ""
-        val resultJson = runProcess(
-            cmd = listOf("python3", "-c", harness, outCsv, seedArg),
-            workDir = dir,
-            timeoutSec = timeoutSec
-        )
-        return resultJson
+        try {
+            val seedArg = seed?.toString() ?: ""
+            val resultJson = runProcess(
+                cmd = listOf("python3", "-c", harness, outCsv, seedArg),
+                workDir = dir,
+                timeoutSec = timeoutSec
+            )
+            return resultJson
+        } catch (e: Exception) {
+            return e.toString()
+        }
     }
 }
