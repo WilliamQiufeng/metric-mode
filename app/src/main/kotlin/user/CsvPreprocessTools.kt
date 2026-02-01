@@ -110,4 +110,41 @@ print(out_path)
 
         return runPython(py, listOf(path, defaultsJson, outputPath ?: ""))
     }
+    @Tool
+    @LLMDescription(
+        "Promote a column to be the 'target' column by moving it to the LAST column position. " +
+                "Writes a new CSV and returns its path. Does not modify the original file."
+    )
+    fun promoteTargetColumn(
+        @LLMDescription("Path to input CSV") path: String,
+        @LLMDescription("Name of the target column to move to the end") targetColumn: String,
+        @LLMDescription("Optional output path; if empty, auto-generate next to input")
+        outputPath: String? = null
+    ): String {
+        val py = """
+import os, sys
+import pandas as pd
+
+path = sys.argv[1]
+target = sys.argv[2]
+out_path = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
+
+df = pd.read_csv(path)
+
+if target not in df.columns:
+    raise ValueError(f"Target column '{target}' not found. Available: {list(df.columns)}")
+
+cols = [c for c in df.columns if c != target] + [target]
+df = df[cols]
+
+if not out_path:
+    base, ext = os.path.splitext(path)
+    out_path = base + "_targetlast.csv"
+
+df.to_csv(out_path, index=False)
+print(out_path)
+""".trimIndent()
+
+        return runPython(py, listOf(path, targetColumn, outputPath ?: ""))
+    }
 }
