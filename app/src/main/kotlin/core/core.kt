@@ -25,7 +25,7 @@ import kotlin.io.path.writeText
  * 1) Validate checklist is fully confirmed.
  * 2) Derive ChecklistSpec from checklist.snapshot() (no need to modify checklist class).
  * 3) Ask LLM to pick a model family category (cluster category only).
- * 4) Ask LLM to pick 3 concrete models under that family (library + model id).
+ * 4) Ask LLM to pick 4 concrete models under that family (library + model id).
  * 5) For each model (in its own directory):
  *    - generate model.py and test.py
  *    - execute test.py; if failed, triage TEST vs MODEL:
@@ -205,20 +205,20 @@ Candidates:
     }
 
     /**
-     * pick EXACTLY 3 concrete models under the picked family.
+     * pick EXACTLY 4 concrete models under the picked family.
      */
     suspend fun pickConcreteModels(spec: ChecklistSpec, family: ModelFamilyCategory): List<ConcreteModelChoice> {
         val fixingParser = StructureFixingParser(model = fixerModel, retries = 2)
 
-        val p = prompt("pick-3-concrete-models") {
+        val p = prompt("pick-4-concrete-models") {
             system(
                 """
 You are a senior ML engineer.
-Choose EXACTLY 3 different concrete model implementations under the given family.
+Choose EXACTLY 4 different concrete model implementations under the given family.
 
 Hard rules:
-- Output ONLY structured JSON per schema: { "choices": [ {..}, {..}, {..} ] }
-- choices length MUST be 3.
+- Output ONLY structured JSON per schema: { "choices": [ {..}, {..}, {..}, {..} ] }
+- choices length MUST be 4.
 - Each (library, modelId) must be distinct.
 - Prefer widely available libraries; avoid exotic dependencies unless necessary.
 - extraDependencies must be pip-installable strings (e.g., "xgboost", "torch").
@@ -241,7 +241,7 @@ Examples:
 - library="xgboost", modelId="XGBClassifier"
 - library="torch", modelId="small_mlp"
 
-Now return 3 choices.
+Now return 4 choices.
                 """.trimIndent()
             )
         }
@@ -253,9 +253,9 @@ Now return 3 choices.
         )
         val list = result.getOrThrow().data.choices
 
-        if (list.size != 3) error("LLM must return exactly 3 model choices, got ${list.size}")
+        if (list.size != 4) error("LLM must return exactly 44 model choices, got ${list.size}")
         val distinct = list.map { it.library.trim() + "::" + it.modelId.trim() }.distinct()
-        if (distinct.size != 3) error("LLM must return 3 distinct (library, modelId) pairs.")
+        if (distinct.size != 4) error("LLM must return 4 distinct (library, modelId) pairs.")
         return list
     }
 
@@ -685,7 +685,7 @@ $lastOutput
     // ------------------------------------------------------------------------
 
     /**
-     * Run 3 models in different directories, then finalize best into workDir root.
+     * Run 4 models in different directories, then finalize best into workDir root.
      */
     suspend fun run(
         checklist: ChecklistLike,

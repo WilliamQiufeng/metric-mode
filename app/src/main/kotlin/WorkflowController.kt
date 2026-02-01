@@ -177,7 +177,7 @@ conversation. Listen to and guide the user describing their expectations. Ask an
 Fill in a checklist while you listen. Ask for data files like CSV. Read through the first few lines to know more about
  it, and use tools given to check any null values and propose to fill in a default value, and also promote a column as the
  target column to train for. After promotion, set the data path using setDataPath to point to the csv after promotion.
- Do not call setDataPath until you have done all the steps above.
+ Do not call setDataPath until you have done all the steps above. Do not use the source csv for BOTH promotion and null defaulting.
  Ask to generate a prediction set with generateCsvFromPython. The prediction set should contain random data with 
  the columns from the data file, but with the promoted column deleted (as well as target column).
  Use the tool given to achieve that, and set the prediction data path in the checklist to the generated prediction set file.

@@ -35,7 +35,7 @@ fun readMetricValue(candidateDir: String): Double? {
 fun pickBest(outcomes: List<MlAutoGenCore.CandidateOutcome>): MlAutoGenCore.CandidateOutcome? {
     val successes = outcomes.filter { it.result is MlAutoGenCore.CandidateResult.Success }
     if (successes.isEmpty()) return null
-    return successes.maxByOrNull { o -> readMetricValue(o.workDir) ?: Double.NEGATIVE_INFINITY }
+    return successes.minByOrNull { o -> readMetricValue(o.workDir) ?: Double.POSITIVE_INFINITY }
 }
 
 
