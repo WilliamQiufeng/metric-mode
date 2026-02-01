@@ -24,6 +24,21 @@ import org.example.app.intermediate.ModelAutoGenChecklist
 private const val IRIS_CSV_URL =
     "https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv"
 
+private fun readMetricValue(candidateDir: String): Double? {
+    val p = Path.of(candidateDir).resolve("metrics.json")
+    if (!p.exists()) return null
+    val txt = Files.readString(p)
+    val m = Regex(""""value"\s*:\s*([-+]?\d+(\.\d+)?([eE][-+]?\d+)?)""").find(txt) ?: return null
+    return m.groupValues[1].toDoubleOrNull()
+}
+
+private fun pickBest(outcomes: List<MlAutoGenCore.CandidateOutcome>): MlAutoGenCore.CandidateOutcome? {
+    val successes = outcomes.filter { it.result is MlAutoGenCore.CandidateResult.Success }
+    if (successes.isEmpty()) return null
+    return successes.maxByOrNull { o -> readMetricValue(o.workDir) ?: Double.NEGATIVE_INFINITY }
+}
+
+
 private fun downloadIfMissing(url: String, dest: Path) {
     if (dest.exists()) return
     dest.parent.createDirectories()
@@ -112,14 +127,38 @@ fun main() = runBlocking {
 
         // 5) Assert success
         when (result) {
-            is PipelineResult.Success -> {
-                println("✅ Pipeline success")
-                println("workDir = ${result.workDir}")
-                println("stdout:\n${result.stdout}")
-                if (result.stderr.isNotBlank()) println("stderr:\n${result.stderr}")
+            is PipelineResult.Multi -> {
+                println("=== Pipeline finished: ${result.outcomes.size} candidates ===")
+
+                result.outcomes.forEach { o ->
+                    val tag = "candidate#${o.index} ${o.concrete.library}/${o.concrete.modelId}"
+                    when (val r = o.result) {
+                        is MlAutoGenCore.CandidateResult.Success -> {
+                            val mv = readMetricValue(o.workDir)
+                            println("✅ $tag SUCCESS dir=${o.workDir} metric=${mv ?: "NA"}")
+                            println("stdout:\n${r.stdout}")
+                            if (r.stderr.isNotBlank()) println("stderr:\n${r.stderr}")
+                        }
+                        is MlAutoGenCore.CandidateResult.Failed -> {
+                            println("❌ $tag FAILED dir=${o.workDir}")
+                            println("reason=${r.reason}")
+                            if (!r.lastError.isNullOrBlank()) println("LastError:\n${r.lastError}")
+                        }
+                    }
+                    println("------------------------------------------------------------")
+                }
+
+                val best = pickBest(result.outcomes)
+                if (best == null) {
+                    error("❌ All candidates failed.")
+                } else {
+                    val mv = readMetricValue(best.workDir)
+                    println("🏆 BEST = candidate#${best.index} ${best.concrete.library}/${best.concrete.modelId} dir=${best.workDir} metric=${mv ?: "NA"}")
+                }
             }
+
             is PipelineResult.Failed -> {
-                error("❌ Pipeline failed: ${result.reason}\nLastError=${result.lastError}\n")
+                error("❌ Pipeline failed early: ${result.reason}\nLastError=${result.lastError}\n")
             }
         }
     }

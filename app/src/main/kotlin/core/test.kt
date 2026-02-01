@@ -11,6 +11,9 @@ import java.nio.file.Path
  * 1) Ask LLM to generate test.py that validates MODEL_API_CONTRACT and basic runtime.
  * 2) Run python to execute test.py.
  * 3) Return stdout/stderr/exitCode to core, so core can feed errors back to model generator.
+ *
+ * New (requested):
+ * 4) test.py must train on data (real if possible), compute metric, and write it to a file (metrics.json by default).
  */
 class TestGenerator(
     private val executor: PromptExecutor,
@@ -44,6 +47,39 @@ Additionally MUST test serialization:
    - loaded model can predict with correct length/type
 If save/load are missing, fail with a clear AssertionError message.
 
+NEW REQUIREMENT: METRIC TRAINING RUN + METRIC FILE OUTPUT (VERY IMPORTANT)
+4) The test MUST run a training/evaluation pass and compute a basic metric, then write it to a file.
+   - Use train/test split on the loaded dataset (or synthetic fallback).
+   - Compute the metric indicated by `metric` in Task spec (case-insensitive).
+   - Write a JSON file to METRIC_PATH environment variable if set, otherwise "metrics.json".
+   - JSON must include at least:
+       {
+         "metric": "<metric_name>",
+         "value": <number>,
+         "n_samples": <int>,
+         "n_train": <int>,
+         "n_test": <int>,
+         "outputType": "<...>",
+         "trainingType": "<...>",
+         "dataPath": "<...>"
+       }
+   - Also print a single line to stdout: "METRIC <metric_name>=<value>" for easy parsing.
+   - Do NOT delete the metrics file on success.
+
+Metric rules (no external deps):
+- Use ONLY Python stdlib + numpy. Do NOT import sklearn/pandas/scipy.
+- If metric is unknown/unavailable:
+    * classification -> default to accuracy
+    * regression -> default to rmse
+
+Suggested metric implementations (pure numpy):
+- Classification: accuracy, f1 (macro) if requested (optional, but if asked you should implement)
+- Regression: mse, rmse, mae, r2
+
+Split strategy rules:
+- If splitStrategy string contains "kfold" or "cv" (case-insensitive), do 5-fold CV and report average metric.
+- Otherwise do a single holdout split (80/20) with numpy RNG (seeded).
+
 Data handling rules (VERY IMPORTANT):
 - Prefer using the real dataset at data_path if it exists.
   * If data_path is a directory: look for the first *.csv inside.
@@ -68,6 +104,7 @@ Robustness & debuggability:
 - On any exception, print full traceback.
 - If serialization fails, print diagnostics about tmp_model.json (file size + first 200 bytes/chars if readable).
 - Always clean up tmp_model.json on success.
+- If metric file write fails, raise AssertionError with a clear message.
 
 Task spec:
 - inputType = ${spec.inputType}
@@ -120,7 +157,11 @@ class PythonRunner {
         val pb = ProcessBuilder(command)
             .directory(workDir.toFile())
             .redirectErrorStream(true) // ✅ stderr 合并到 stdout，避免死锁
-        pb.environment()["PYTHONUNBUFFERED"] = "1"
+
+        val env = pb.environment()
+        env["PYTHONUNBUFFERED"] = "1"
+        // NEW: metric 输出文件路径（test.py 内部会优先读 METRIC_PATH）
+        env.putIfAbsent("METRIC_PATH", "metrics.json")
 
         val process = pb.start()
         val combined = process.inputStream.bufferedReader(StandardCharsets.UTF_8).readText()
