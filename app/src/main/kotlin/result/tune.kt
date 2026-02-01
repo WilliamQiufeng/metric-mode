@@ -139,8 +139,7 @@ $contract
 2) Output ONLY valid Python code. No markdown fences. No explanations.
 
 3) Dependencies:
-   - Prefer Python stdlib + numpy only.
-   - Do NOT require pandas.
+   - Prefer Python stdlib + numpy + pandas + json only.
    - sklearn is optional; if unavailable, implement split/metric in numpy.
 
 4) Dataset loading (CRITICAL):
@@ -150,7 +149,7 @@ $contract
    - For supervised tasks: if header exists, prefer target column names:
      ["label","target","y","class","species","outcome"]
      else ALWAYS use last column as y.
-   - X must exclude y column. Convert X to float safely.
+   - X must exclude y column. Convert X to float safely, dropping all non-numeric columns using select_dtypes(include=["number"])
    - If y is string labels: encode to integers and save mapping.
 
 5) Tuning (MUST):
