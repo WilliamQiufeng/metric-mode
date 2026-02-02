@@ -1,0 +1,7 @@
+{
+  "datasetPathFile": "/tmp/ml/dataset_path.txt",
+  "checklistStatusFile": "/tmp/ml/checklist_status.txt",
+  "generatedMlRoot": "/tmp/ml/generated_ml/",
+  "selectedBestFile": "/tmp/ml/generated_ml/selected_best.txt",
+  "fileServerUrl": "http://localhost:8080"
+}
